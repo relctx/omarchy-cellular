@@ -72,11 +72,17 @@ Panel {
 
   // Button sizes to its content, so a long profile name pushes the action chips
   // off the panel.
-  function shortLabel(name, provider) {
+  // The last four ICCID digits, always. Issuers reuse one profileName across
+  // every profile they sell -- two Airalo plans both read "WEBBING · Airalo" --
+  // and the ICCID is the only thing that differs. Showing it always means the
+  // row you click is the row you meant, without renaming anything first.
+  function shortLabel(name, provider, iccid) {
     var n = name || "Unnamed"
-    if (n.length > 22) n = n.slice(0, 21) + "…"
-    if (!provider || provider === n) return n
-    return n + "  ·  " + (provider.length > 12 ? provider.slice(0, 11) + "…" : provider)
+    if (n.length > 18) n = n.slice(0, 17) + "…"
+    var tail = iccid ? String(iccid).slice(-4) : ""
+    if (provider && provider !== n)
+      n += "  ·  " + (provider.length > 10 ? provider.slice(0, 9) + "…" : provider)
+    return tail ? n + "  ·  " + tail : n
   }
 
   // Apply the change to the local list; reloading costs a second authorization
@@ -1362,7 +1368,8 @@ Panel {
                     height: addBtn.height
                     fontSize: Style.font.caption
                     verticalPadding: Style.space(2)
-                    text: root.shortLabel(modelData.name, modelData.provider)
+                    text: root.shortLabel(modelData.name, modelData.provider,
+                                          modelData.iccid)
                     tooltipText: (root.profileEnabled(modelData)
                       ? "Active profile" : "Switch to this profile")
                       + (modelData.class === "test" ? " (test profile)" : "")
