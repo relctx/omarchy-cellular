@@ -1641,12 +1641,9 @@ cmd_profile() {
     # reports anything at all.
     local scanned
     scanned=$(cmd_scan) || return 1   # cmd_scan notifies its own reason
-    if cmd_profile download "$scanned"; then
-      notify "eSIM profile installed — press Refresh to see it"
-    else
-      notify "eSIM install failed"
-      return 1
-    fi
+    # download reports its own failure, including lpac's reason.
+    cmd_profile download "$scanned" || return 1
+    notify "Profile installed — press Refresh to see it"
     ;;
   download | add)
     [[ -n $arg ]] || {
@@ -1659,15 +1656,16 @@ cmd_profile() {
     out=$(lpac_run profile download -a "$arg") || out=""
     if jq -e '.payload.code == 0' <<<"$out" >/dev/null 2>&1; then
       echo "Profile downloaded. Enable it with: omarchy-cellular profile enable <iccid>"
-      notify "eSIM profile downloaded"
     else
       # lpac says which step failed: an unreachable SM-DP+, a used or expired
       # code and a wrong one all land here and want different answers.
-      why=$(jq -r '.payload.message // empty' <<<"$out" 2>/dev/null)
-      # euicc_init means the channel to the card never opened, which is a port
-      # timing problem, not a bad code. Anything else came from the SM-DP+.
+      # lpac stacks the failing calls, innermost last, across several lines.
+      why=$(jq -r '.payload.message // empty' <<<"$out" 2>/dev/null | tr '\n' ' ')
+      why=${why%% }
       case $why in
-      euicc_init) why="could not reach the eSIM; try again" ;;
+      *activation_code*) why="that activation code was not accepted" ;;
+      *euicc_init*) why="could not reach the eSIM; try again" ;;
+      *http*|*curl*|*network*) why="could not reach the server" ;;
       "") why="no answer from lpac" ;;
       esac
       echo "Download failed: $why" >&2
