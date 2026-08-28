@@ -1569,6 +1569,7 @@ cmd_scan() {
   command -v zbarimg >/dev/null && command -v grim >/dev/null && command -v slurp >/dev/null || {
     echo "Scanning needs zbar and grim/slurp." >&2
     echo "Install with:  omarchy pkg add zbar grim slurp" >&2
+    notify "Scanning needs zbar and grim/slurp"
     return 1
   }
 
@@ -1578,10 +1579,12 @@ cmd_scan() {
 
   region=$(slurp -d 2>/dev/null) || {
     echo "Cancelled." >&2
+    notify "Scan cancelled"
     return 1
   }
   grim -g "$region" "$shot" 2>/dev/null || {
     echo "Could not capture that region." >&2
+    notify "Could not capture that region"
     return 1
   }
 
@@ -1596,6 +1599,7 @@ cmd_scan() {
   [[ $code == LPA:* ]] || {
     echo "That QR code is not an eSIM activation code:" >&2
     echo "  $code" >&2
+    notify "Not an eSIM activation code"
     return 1
   }
 
@@ -1636,10 +1640,7 @@ cmd_profile() {
     # Run detached from the panel, so a notification is the only way this
     # reports anything at all.
     local scanned
-    scanned=$(cmd_scan) || {
-      notify "eSIM scan cancelled"
-      return 1
-    }
+    scanned=$(cmd_scan) || return 1   # cmd_scan notifies its own reason
     if cmd_profile download "$scanned"; then
       notify "eSIM profile installed — press Refresh to see it"
     else
