@@ -1643,12 +1643,23 @@ cmd_profile() {
     }
     profile_precheck || return 1
     echo "Downloading (this takes up to a minute and drops cellular)…"
-    if lpac_run profile download -a "$arg" | jq -e '.payload.code == 0' >/dev/null 2>&1; then
+    local out why
+    out=$(lpac_run profile download -a "$arg") || out=""
+    if jq -e '.payload.code == 0' <<<"$out" >/dev/null 2>&1; then
       echo "Profile downloaded. Enable it with: omarchy-cellular profile enable <iccid>"
       notify "eSIM profile downloaded"
     else
-      echo "Download failed. Check the activation code has not already been used." >&2
-      notify "eSIM profile download failed"
+      # lpac says which step failed: an unreachable SM-DP+, a used or expired
+      # code and a wrong one all land here and want different answers.
+      why=$(jq -r '.payload.message // empty' <<<"$out" 2>/dev/null)
+      # euicc_init means the channel to the card never opened, which is a port
+      # timing problem, not a bad code. Anything else came from the SM-DP+.
+      case $why in
+      euicc_init) why="could not reach the eSIM; try again" ;;
+      "") why="no answer from lpac" ;;
+      esac
+      echo "Download failed: $why" >&2
+      notify "eSIM download failed: $why"
       return 1
     fi
     ;;
