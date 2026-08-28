@@ -1662,11 +1662,17 @@ cmd_profile() {
       # lpac stacks the failing calls, innermost last, across several lines.
       why=$(jq -r '.payload.message // empty' <<<"$out" 2>/dev/null | tr '\n' ' ')
       why=${why%% }
+      # lpac names the SGP.22 calls it tried. es9p_* are the server side and
+      # es10b_*/euicc_* the card side, so they separate "the server said no"
+      # from "the card would not talk".
       case $why in
-      *activation_code*) why="that activation code was not accepted" ;;
-      *euicc_init*) why="could not reach the eSIM; try again" ;;
-      *http*|*curl*|*network*) why="could not reach the server" ;;
       "") why="no answer from lpac" ;;
+      *activation_code*) why="that activation code was not accepted" ;;
+      *es9p_initiate_authentication*) why="the activation server did not answer" ;;
+      *es9p_*) why="the activation server refused" ;;
+      *euicc_init*) why="could not reach the eSIM; try again" ;;
+      *es10b_*|*euicc*) why="the eSIM refused" ;;
+      *http*|*curl*|*network*) why="could not reach the server" ;;
       esac
       echo "Download failed: $why" >&2
       notify "eSIM download failed: $why"
