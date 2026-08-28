@@ -414,7 +414,8 @@ modem_index() {
 # otherwise raise a toast that overlays the very panel you are looking at.
 notify() {
   [[ ${OMARCHY_CELLULAR_QUIET:-0} == 1 ]] && return 0
-  notify-send -u low "Cellular" "$1" 2>/dev/null
+  omarchy-notification-send -g "󰢾" "Cellular" "$1" 2>/dev/null ||
+    notify-send -u low "Cellular" "$1" 2>/dev/null
 }
 
 # Created on first use. 600 because it can hold a SIM PIN.
@@ -1632,9 +1633,19 @@ cmd_profile() {
     ;;
   scan)
     # Scan and install in one step; the code is never shown or stored.
+    # Run detached from the panel, so a notification is the only way this
+    # reports anything at all.
     local scanned
-    scanned=$(cmd_scan) || return 1
-    cmd_profile download "$scanned"
+    scanned=$(cmd_scan) || {
+      notify "eSIM scan cancelled"
+      return 1
+    }
+    if cmd_profile download "$scanned"; then
+      notify "eSIM profile installed — press Refresh to see it"
+    else
+      notify "eSIM install failed"
+      return 1
+    fi
     ;;
   download | add)
     [[ -n $arg ]] || {

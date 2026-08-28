@@ -52,6 +52,9 @@ Panel {
   // The list as it was before an optimistic change, so a failed one can be put
   // back. Empty means nothing is pending.
   property var profilesUndo: []
+  // A scan runs detached, so the panel never hears whether it installed
+  // anything. Mark the list as possibly out of date instead of guessing.
+  property bool profilesStale: false
 
   function loadProfiles() {
     // Clicking again cancels a run waiting on the authorization prompt.
@@ -1476,12 +1479,19 @@ Panel {
                   fontSize: Style.font.caption
                   verticalPadding: Style.space(2)
                   iconText: "󰑐"
-                  text: "Refresh"
-                  tooltipText: "Re-read profiles from the eSIM"
+                  text: root.profilesStale ? "Refresh · after scan" : "Refresh"
+                  tooltipText: root.profilesStale
+                    ? "A scan ran; re-read the eSIM to see what it installed"
+                    : "Re-read profiles from the eSIM"
                   bordered: true
+                  active: root.profilesStale
                   foreground: root.barForeground
                   fontFamily: root.fontFamily
-                  onClicked: { root.profiles = []; root.loadProfiles() }
+                  onClicked: {
+                    root.profilesStale = false
+                    root.profiles = []
+                    root.loadProfiles()
+                  }
                 }
               }
 
@@ -1514,6 +1524,7 @@ Panel {
                     onClicked: {
                       root.addingProfile = false
                       root.runDetached(root.cli + " profile scan")
+                      root.profilesStale = true
                     }
                   }
 
