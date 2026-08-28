@@ -1,0 +1,1663 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+
+// Cellular (WWAN) bar widget with an anchored popup panel, following
+// the same pattern as the first-party network/power/bluetooth widgets. All
+// state comes from `omarchy-cellular panel` — one process spawn per refresh.
+Panel {
+  id: root
+  moduleName: "relctx.cellular"
+  ipcTarget: "relctx.cellular"
+
+  property var info: ({})
+  readonly property string wwanState: info.state || "absent"
+  readonly property bool hwPresent: info.hw === "yes"
+  readonly property bool installed: info.installed === "yes"
+  readonly property bool connected: wwanState === "connected"
+  readonly property bool busy: actionProc.running
+  readonly property bool roaming: info.roaming === "yes"
+  readonly property string modesAllowed: info.modes_allowed || ""
+  readonly property string modesPreferred: info.modes_preferred || ""
+  // Chips come from what the modem actually has: a 5G part may lack 2g, an
+  // older one 5g. Fastest first, with Auto in front.
+  readonly property var modeChips: {
+    var gens = (info.modes_supported || "").split(",").filter(function (g) { return g })
+    var order = ["5g", "4g", "3g", "2g"]
+    var out = [{ id: "auto", label: "Auto", match: gens.join(",") }]
+    for (var i = 0; i < order.length; i++)
+      if (gens.indexOf(order[i]) !== -1)
+        out.push({ id: order[i], label: order[i].toUpperCase(), match: order[i] })
+    return out
+  }
+  // The identifiers below name you or the hardware rather than the network:
+  // number, IMEI, ICCID, EID. A bar panel gets screenshotted and screen-shared,
+  // so they start hidden.
+  property bool detailsRevealed: false
+  // Identifiers and firmware strings are reference material, not something you
+  // check daily, so the section starts folded away.
+  property bool deviceExpanded: false
+  property bool apnEditing: false
+  property bool limitEditing: false
+  property bool carrierExpanded: false
+  // Profiles cannot be polled: reading them stops ModemManager and needs
+  // pkexec, so they load once when the section is opened and stay until asked
+  // for again.
+  property bool esimExpanded: false
+  property bool profilesLoading: false
+  property var profiles: []
+  property bool addingProfile: false
+  property string profileError: ""
+  // Which profile is being renamed, by iccid; empty when none.
+  property string renamingIccid: ""
+  // The list as it was before an optimistic change, so a failed one can be put
+  // back. Empty means nothing is pending.
+  property var profilesUndo: []
+
+  function loadProfiles() {
+    // A run already pending on the authorization prompt used to swallow every
+    // further click, so the button looked dead. Clicking again cancels it.
+    if (profilesLoading) {
+      profileProc.running = false
+      profilesLoading = false
+      profileError = "Cancelled."
+      return
+    }
+    profilesLoading = true
+    profileError = ""
+    profileProc.command = [root.cli, "profile", "list"]
+    profileProc.running = true
+  }
+
+  // Button sizes to its content, so a long profile name overrides the width it
+  // is given and shoves the action chips off the panel. Cap it here.
+  function shortLabel(name, provider) {
+    var n = name || "Unnamed"
+    if (n.length > 22) n = n.slice(0, 21) + "…"
+    if (!provider || provider === n) return n
+    return n + "  ·  " + (provider.length > 12 ? provider.slice(0, 11) + "…" : provider)
+  }
+
+  // Reloading after a change would mean a second authorization prompt for an
+  // outcome we already know, so apply it to the local list instead. Refresh
+  // re-reads from the eSIM when you want the truth.
+  // Editable fields are seeded, never bound: a binding to root.info is
+  // re-evaluated on every status poll and overwrites what is being typed.
+  // NetworkManager penalises a default route by 20000 until its connectivity
+  // check confirms the link, so for a few seconds after the toggle the old link
+  // still carries traffic. Say so rather than looking broken.
+  readonly property string routeLabel: {
+    var via = info.route_via || ""
+    var onCellular = via !== "" && via.indexOf("ww") === 0
+    if (info.prefer_cellular === "yes")
+      return onCellular ? "Traffic is on cellular" : "Switching\u2026 traffic is still on " + (via || "another link")
+    return onCellular ? "Traffic is on cellular (nothing else is up)"
+                  : "Traffic is on " + (via || "another link")
+  }
+
+  // The provider ModemManager reports for the card, which costs no
+  // authorization and needs no cache to stay true.
+  readonly property string simLabel: info.sim_operator || ""
+
+  function seedLimitFields() {
+    limitField.text = (info.limit && info.limit !== "off") ? info.limit : ""
+    resetDayField.text = info.reset_day || ""
+    periodDaysField.text = info.period_days || ""
+  }
+
+  function applyProfileChange(iccid, kind, value) {
+    profilesUndo = JSON.parse(JSON.stringify(profiles))
+    var out = []
+    for (var i = 0; i < profiles.length; i++) {
+      var p = profiles[i]
+      if (kind === "delete" && p.iccid === iccid) continue
+      if (kind === "rename" && p.iccid === iccid) p.name = value
+      if (kind === "enable") p.state = (p.iccid === iccid) ? "enabled" : "disabled"
+      out.push(p)
+    }
+    profiles = out
+  }
+
+  // The CLI ships beside this file in the plugin, so the panel works straight
+  // from `omarchy plugin add` with nothing on PATH. A ~/.local/bin symlink is
+  // for your own shell, not for this.
+  readonly property string cli: String(Qt.resolvedUrl("../bin/omarchy-cellular")).replace("file://", "")
+
+  // lpac reports profileState as "enabled"/"disabled" in some builds and as
+  // the SGP.22 enum (1/0) in others. Compare through here, never directly.
+  function profileEnabled(p) {
+    var st = String((p && p.state) !== undefined ? p.state : "").toLowerCase()
+    return st === "enabled" || st === "1" || st === "true"
+  }
+
+  function parseProfiles(text) {
+    var byIndex = {}
+    var lines = (text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^profile\.(\d+)\.([a-z]+)=(.*)$/)
+      if (!m) continue
+      if (!byIndex[m[1]]) byIndex[m[1]] = {}
+      byIndex[m[1]][m[2]] = m[3]
+    }
+    var out = []
+    Object.keys(byIndex).sort().forEach(function (k) { out.push(byIndex[k]) })
+    return out
+  }
+  // What the panel is doing right now. The hero shows the last polled state
+  // otherwise, which during a connect reads as if nothing happened.
+  property string busyLabel: ""
+  function maskId(v) {
+    if (!v) return "—"
+    return detailsRevealed ? v : v.slice(0, 4) + "•".repeat(Math.max(0, v.length - 4))
+  }
+  // Defaults to the empty cellular outline until the first read lands.
+  readonly property string icon: info.icon || "󰢿"
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property color dim: Qt.darker(barForeground, 1.4)
+
+  // The switch throws instantly on click; while the toggle is in flight it
+  // shows where we are going, not where we still are.
+  property bool desired: false
+  readonly property bool switchChecked: busy ? desired : connected
+
+  // Throughput and latency, mirroring the first-party network panel: rates
+  // are deltas between successive --verbose samples, and ping keeps a rolling
+  // window in which a timed-out probe counts as a lost packet.
+  property real prevRxBytes: 0
+  property real prevTxBytes: 0
+  property real prevSampleTime: 0
+  property string prevIface: ""
+  property real downloadRate: 0
+  property real uploadRate: 0
+  property var pingSamples: []
+  property real pingLatency: -1
+  property int packetLoss: 0
+  readonly property int pingHistoryWindow: 24
+  readonly property int pingAverageWindow: 5
+  readonly property bool hasPingSamples: pingSamples.length > 0
+  readonly property bool hasTransferStats: info.rx_bytes !== undefined
+  readonly property color urgent: bar && bar.urgent !== undefined ? bar.urgent : "#cc6666"
+
+  // Data-plan meter, fed by the CLI's persistent usage accounting.
+  readonly property real usedBytes: parseFloat(info.used_bytes || "0")
+  readonly property real limitBytes: parseFloat(info.limit_bytes || "0")
+  readonly property bool limitAck: info.limit_ack === "1"
+  readonly property real usedFraction: limitBytes > 0 ? Math.min(1, usedBytes / limitBytes) : 0
+  readonly property string nextResetLabel: {
+    if (!info.next_reset) return ""
+    var d = new Date(info.next_reset + "T00:00:00")
+    if (isNaN(d.getTime())) return ""
+    return "Resets " + Qt.formatDate(d, "MMM d")
+  }
+
+  function capitalise(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : v }
+
+  readonly property string statusText: {
+    if (busyLabel) return busyLabel
+    switch (wwanState) {
+    case "connected": return (info.operator || "Connected") + (info.tech ? " · " + info.tech : "")
+    case "registered": return (info.operator || "Registered")
+      + (info.reason ? " — " + info.reason : " — not connected")
+    // The network usually says why it refused. "Searching" forever is a much
+    // worse answer than "not provisioned", so prefer the reason when there is
+    // one; a modem that is genuinely still looking reports none.
+    case "searching": return info.reason ? capitalise(info.reason) : "Searching for network"
+    case "nosim": return info.active_slot === "2"
+      ? "eSIM is empty — no profile"
+      : "SIM slot " + (info.active_slot || "?") + " is empty"
+    case "locked": return "SIM locked — PIN required"
+    case "disabled": return "Cellular off"
+    default: return "Modem starting…"
+    }
+  }
+
+  function refresh() {
+    if (!statusProc.running) statusProc.running = true
+  }
+
+  function refreshDetails() {
+    if (!detailsProc.running) detailsProc.running = true
+  }
+
+  function updateInfo(raw) {
+    var next = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var eq = lines[i].indexOf("=")
+      if (eq > 0) next[lines[i].slice(0, eq)] = lines[i].slice(eq + 1)
+    }
+    // Keep the last known state across a transient empty read, so the widget
+    // never blinks out while the CLI is briefly unavailable.
+    if (Object.keys(next).length === 0) return
+    updateStats(next)
+    info = next
+  }
+
+  function updateStats(next) {
+    var iface = next.iface || ""
+    var now = Date.now() / 1000
+
+    if (next.rx_bytes === undefined || iface !== prevIface || prevSampleTime === 0) {
+      // First sample after open, or the modem moved to another interface —
+      // a delta against the old counters would manufacture a spike.
+      downloadRate = 0
+      uploadRate = 0
+    } else {
+      var dt = now - prevSampleTime
+      if (dt > 0) {
+        downloadRate = Math.max(0, (parseFloat(next.rx_bytes) - prevRxBytes) / dt)
+        uploadRate = Math.max(0, (parseFloat(next.tx_bytes) - prevTxBytes) / dt)
+      }
+    }
+    prevIface = iface
+    prevRxBytes = parseFloat(next.rx_bytes || "0")
+    prevTxBytes = parseFloat(next.tx_bytes || "0")
+    prevSampleTime = next.rx_bytes === undefined ? 0 : now
+
+    if (next.ping_ms === undefined) return
+    var v = parseFloat(next.ping_ms)
+    var samples = pingSamples.slice()
+    samples.push(isFinite(v) && v >= 0 ? v : null)
+    while (samples.length > pingHistoryWindow) samples.shift()
+    pingSamples = samples
+
+    var total = 0, count = 0
+    for (var i = Math.max(0, samples.length - pingAverageWindow); i < samples.length; i++) {
+      if (typeof samples[i] === "number") { total += samples[i]; count++ }
+    }
+    pingLatency = count > 0 ? total / count : -1
+
+    var lost = 0
+    for (var j = 0; j < samples.length; j++) if (samples[j] === null) lost++
+    packetLoss = Math.round((lost / samples.length) * 100)
+  }
+
+  function resetStats() {
+    prevSampleTime = 0
+    prevIface = ""
+    downloadRate = 0
+    uploadRate = 0
+    pingSamples = []
+    pingLatency = -1
+    packetLoss = 0
+  }
+
+  function formatBytes(bytes) {
+    var n = Number(bytes)
+    if (!isFinite(n) || n < 0) n = 0
+    if (n < 1024) return Math.round(n) + " B"
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB"
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB"
+    return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB"
+  }
+
+  function formatRate(bytesPerSec) {
+    return formatBytes(bytesPerSec) + "/s"
+  }
+
+  function formatPing(ms) {
+    if (!hasPingSamples) return "--"
+    var v = parseFloat(ms)
+    if (!isFinite(v) || v < 0) return "Timeout"
+    return v.toFixed(v > 0 && v < 10 ? 1 : 0) + " ms"
+  }
+
+  function formatLoss(percent) {
+    if (!hasPingSamples) return "--"
+    var v = parseInt(percent, 10)
+    return (!v || v < 0 ? 0 : v) + "%"
+  }
+
+  // The panel renders its own busy and failure state, so suppress the toasts
+  // these would otherwise stack on top of it.
+  function labelFor(cmd) {
+    var verb = cmd[1] || ""
+    if (verb === "connect") return "Connecting…"
+    if (verb === "disconnect") return "Disconnecting…"
+    if (verb === "toggle") return root.connected ? "Disconnecting…" : "Connecting…"
+    if (verb === "sim") return "Switching SIM…"
+    if (verb === "mode") return "Setting radio mode…"
+    if (verb === "autoconnect") return "Saving…"
+    if (verb === "profile") return "Updating the eSIM…"
+    if (verb === "-c") return "Detecting carrier…"
+    return "Working…"
+  }
+
+  function runAction(cmd) {
+    if (actionProc.running) return
+    root.busyLabel = root.labelFor(cmd)
+    actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
+    actionProc.running = true
+  }
+
+  function toggleData() {
+    if (busy) return
+    desired = !connected
+    runAction([root.cli, "toggle"])
+  }
+
+  // Flows that open their own UI (menu pickers, floating terminals) — the
+  // panel gets out of their way first.
+  function runDetached(cmd) {
+    root.close()
+    if (root.bar) root.bar.run(cmd)
+  }
+
+  // Copy without closing the panel: you are usually reading the value you just
+  // copied. Masked fields copy what they are hiding, not the dots.
+  function copyValue(v) {
+    if (!v) return
+    copyProc.command = ["wl-copy", "--", v]
+    copyProc.running = true
+    root.copied = v
+    copiedTimer.restart()
+  }
+  property string copied: ""
+
+  onOpenedChanged: if (!opened) resetStats()
+
+  visible: hwPresent
+  implicitWidth: hwPresent ? button.implicitWidth : 0
+  implicitHeight: hwPresent ? button.implicitHeight : 0
+
+  Process {
+    id: statusProc
+    command: [root.cli, "panel"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateInfo(text) }
+  }
+
+  // The verbose feed adds byte counters and an interface-bound ping; the ping
+  // can burn its full 1s timeout, so only the open panel pays for it.
+  Process {
+    id: detailsProc
+    command: [root.cli, "panel", "--verbose"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateInfo(text) }
+  }
+
+  Process {
+    id: actionProc
+    stderr: StdioCollector { id: actionErr; waitForEnd: true }
+    onExited: function (code) {
+      root.busyLabel = ""
+      // The list is updated before the command runs, so a failure would
+      // otherwise show as a rename that took and then silently reverted on the
+      // next refresh. Put it back and say what happened.
+      if (code !== 0 && root.profilesUndo.length > 0) {
+        root.profiles = root.profilesUndo
+        root.profileError = (actionErr.text || "").trim() || "That did not work."
+      }
+      root.profilesUndo = []
+      root.opened ? root.refreshDetails() : root.refresh()
+    }
+  }
+
+  Process { id: copyProc }
+
+  Process {
+    id: profileProc
+    stdout: StdioCollector { id: profileOut; waitForEnd: true }
+    stderr: StdioCollector { id: profileErr; waitForEnd: true }
+    onExited: function (code) {
+      root.profilesLoading = false
+      root.profiles = root.parseProfiles(profileOut.text)
+      // An empty list and a failed read look identical otherwise, and the read
+      // fails often enough -- ModemManager restarting from a previous lpac run
+      // is the usual reason.
+      root.profileError = (root.profiles.length === 0)
+        ? ((profileErr.text || "").trim() || (code !== 0 ? "Could not read the eSIM." : ""))
+        : ""
+    }
+  }
+
+  Timer {
+    id: copiedTimer
+    interval: 1200
+    onTriggered: root.copied = ""
+  }
+
+  // Background poll for the bar icon; the open panel has its own cadence.
+  Timer {
+    interval: Math.max(2, root.setting("interval", 10)) * 1000
+    running: !root.opened
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refresh()
+  }
+
+  // Same rhythm as the Wi-Fi panel's stats poll.
+  Timer {
+    interval: 1500
+    running: root.opened
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refreshDetails()
+  }
+
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    text: root.icon
+    // Powered but not carrying traffic reads as a dimmed glyph, exactly like
+    // the disconnected Wi-Fi arc next door.
+    opacity: root.connected ? 1 : 0.5
+    slotSize: Style.bar.statusSlot
+    // Tooltip suppressed because the panel is the detail view.
+    tooltipText: ""
+    onPressed: function(b) {
+      if (b === Qt.RightButton) root.toggleData()
+      else if (b === Qt.MiddleButton) root.refresh()
+      else root.toggle()
+    }
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened && root.hwPresent
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(340))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onCloseRequested: root.close()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+
+      Column {
+        id: column
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        spacing: Style.space(14)
+
+        // ---------- Hero: glyph · title/status · on-off switch ----------
+        PanelHero {
+          width: parent.width
+          title: "Cellular"
+          meta: root.statusText
+          foreground: root.barForeground
+          fontFamily: root.fontFamily
+          iconOpacity: root.connected ? 1.0 : 0.5
+          iconComponent: Component {
+            Text {
+              text: root.icon
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+            }
+          }
+          trailingControl: Component {
+            ToggleSwitch {
+              visible: root.installed
+              checked: root.switchChecked
+              busy: root.busy
+              foreground: root.barForeground
+              onToggled: root.toggleData()
+            }
+          }
+        }
+
+        // ---------- Connection stats ----------
+        // Same grid as the Wi-Fi panel: label/value pairs in two columns,
+        // ping rows turning urgent as soon as a probe is lost.
+        Row {
+          visible: root.connected
+          width: parent.width
+          spacing: Style.space(20)
+
+          // Paired by row, not by column: Receiving/Sending and
+          // Downloaded/Uploaded read as pairs, and a missing signal field no
+          // longer shifts everything below it out of alignment.
+          Column {
+            width: (parent.width - parent.spacing) / 2
+            spacing: Style.spacing.labelGap
+            InfoPair { label: "Operator"; value: root.info.operator || "—" }
+            InfoPair { label: "Signal"; value: (root.info.signal || "0") + "%" }
+            InfoPair { label: "RSSI"; value: root.info.sig_rssi || "—" }
+            InfoPair { label: "RSRQ"; value: root.info.sig_rsrq || "—" }
+            InfoPair {
+              label: "Ping"
+              value: root.formatPing(root.pingLatency)
+              valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+            }
+            InfoPair { label: "Receiving"; value: root.hasTransferStats ? root.formatRate(root.downloadRate) : "--" }
+            InfoPair { label: "Downloaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.rx_bytes || "0")) : "--" }
+            InfoPair { label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+          }
+
+          Column {
+            width: (parent.width - parent.spacing) / 2
+            spacing: Style.spacing.labelGap
+            InfoPair { label: "Technology"; value: root.info.tech || "—" }
+            InfoPair {
+              label: "Roaming"
+              value: root.roaming ? "Yes" : "No"
+              valueColor: root.roaming ? root.urgent : root.barForeground
+            }
+            InfoPair { label: "RSRP"; value: root.info.sig_rsrp || "—" }
+            InfoPair { label: "SNR"; value: root.info.sig_snr || "—" }
+            InfoPair {
+              label: "Packet Loss"
+              value: root.formatLoss(root.packetLoss)
+              valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+            }
+            InfoPair { label: "Sending"; value: root.hasTransferStats ? root.formatRate(root.uploadRate) : "--" }
+            InfoPair { label: "Uploaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.tx_bytes || "0")) : "--" }
+          }
+        }
+
+        // ---------- Switches ----------
+        // Header-row switches rather than full-width toggles, following the
+        // Wi-Fi panel's AUTOMATIC control: these are settings you flip rarely
+        // and read often, so they belong beside their label, not in a card.
+        PanelSeparator {
+          visible: root.installed
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.installed
+          width: parent.width
+          spacing: Style.space(8)
+
+          SwitchRow {
+            width: parent.width
+            label: "PRIORITIZE CELLULAR"
+            visible: root.hwPresent
+            checked: root.info.prefer_cellular === "yes"
+            // The number behind this is computed, not typed: exposing a route
+            // metric would mean nothing without NetworkManager's per-device
+            // defaults, and one wrong digit routes everything over a metered
+            // link. The tooltip reports the link that actually has the
+            // traffic, read from `ip route get`, so it is never a guess.
+            tip: root.routeLabel
+            onFlipped: root.runAction([root.cli, "prefer",
+                                       root.info.prefer_cellular === "yes" ? "wifi" : "cellular"])
+          }
+
+          SwitchRow {
+            width: parent.width
+            label: "METERED"
+            checked: root.info.metered === "yes"
+            tip: root.info.metered === "yes"
+              ? "Apps that honor it defer downloads and updates"
+              : "Nothing defers downloads; the data cap still applies"
+            onFlipped: root.runAction([root.cli, "metered",
+                                       root.info.metered === "yes" ? "no" : "yes"])
+          }
+
+          SwitchRow {
+            width: parent.width
+            label: "AUTOCONNECT"
+            checked: root.info.autoconnect === "yes"
+            tip: root.info.autoconnect === "yes"
+              ? "Cellular comes up at boot"
+              : "Cellular stays down until you connect"
+            onFlipped: root.runAction([root.cli, "autoconnect",
+                                       root.info.autoconnect === "yes" ? "off" : "on"])
+          }
+        }
+
+        // ---------- Data plan ----------
+        PanelSeparator { foreground: root.barForeground }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(planHeader.implicitHeight, planButton.implicitHeight)
+
+            PanelSectionHeader {
+              id: planHeader
+              text: "DATA USAGE"
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+            }
+
+            Button {
+              id: planButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.limitBytes > 0 ? "Change" : "Set limit"
+              fontSize: Style.font.caption
+              bordered: true
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              active: root.limitEditing
+              onClicked: {
+                root.limitEditing = !root.limitEditing
+                if (root.limitEditing) root.seedLimitFields()
+              }
+            }
+          }
+
+          // Usage bar, following the battery panel's progress bar. Turns
+          // urgent at 90% so the cutoff never comes as a surprise.
+          Item {
+            visible: root.limitBytes > 0
+            width: parent.width
+            implicitHeight: Style.space(8)
+
+            Rectangle {
+              id: planTrack
+              anchors.fill: parent
+              radius: height / 2
+              color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.12)
+            }
+
+            Rectangle {
+              anchors.left: planTrack.left
+              anchors.verticalCenter: planTrack.verticalCenter
+              height: planTrack.height
+              radius: planTrack.radius
+              width: Math.max(planTrack.height, planTrack.width * root.usedFraction)
+              color: root.usedFraction >= 0.9 ? root.urgent : root.barForeground
+              Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+            }
+          }
+
+          // Editing inline rather than in a menu: the modal could not show the
+          // usage it was setting a ceiling for, and needed three round trips.
+          Item {
+            width: parent.width
+            clip: true
+            height: root.limitEditing ? limitCol.implicitHeight : 0
+            Behavior on height { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+
+            Column {
+              id: limitCol
+              width: parent.width
+              spacing: Style.space(6)
+
+              // Monthly renews on a date, prepaid bundles run N days from when
+              // they were bought, and neither expresses the other.
+              Row {
+                id: limitPeriods
+                width: parent.width
+                spacing: Style.space(4)
+                readonly property real cell: (width - spacing * 2) / 3
+                readonly property real buttonHeight: monthlyBtn.implicitHeight
+
+                Button {
+                  id: monthlyBtn
+                  width: limitPeriods.cell
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.space(2)
+                  text: "Monthly"
+                  bordered: true
+                  active: root.info.period === "monthly" || !root.info.period
+                  foreground: root.barForeground
+                  fontFamily: root.fontFamily
+                  onClicked: root.runAction([root.cli, "limit", "period", "monthly"])
+                }
+
+                Button {
+                  width: limitPeriods.cell
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.space(2)
+                  text: "Daily"
+                  bordered: true
+                  active: root.info.period === "daily"
+                  foreground: root.barForeground
+                  fontFamily: root.fontFamily
+                  onClicked: root.runAction([root.cli, "limit", "period", "daily"])
+                }
+
+                Button {
+                  width: limitPeriods.cell
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.space(2)
+                  text: "N days"
+                  tooltipText: "A fixed-length bundle, counted from the day you bought it"
+                  bordered: true
+                  active: root.info.period === "days"
+                  foreground: root.barForeground
+                  fontFamily: root.fontFamily
+                  onClicked: root.runAction([root.cli, "limit", "days",
+                                             root.info.period_days || "30"])
+                }
+              }
+
+              // Headers on one row with their fields beneath, so two short
+              // numbers do not each claim a full-width box.
+              Row {
+                width: parent.width
+                spacing: Style.space(6)
+                readonly property bool paired: root.info.period !== "daily"
+                readonly property real cell: paired ? (width - spacing) / 2 : width
+
+                Column {
+                  width: parent.cell
+                  spacing: Style.space(4)
+
+                  PanelSectionHeader {
+                    text: "LIMIT"
+                    foreground: root.barForeground
+                    fontFamily: root.fontFamily
+                  }
+
+                  TextField {
+                    id: limitField
+                    width: parent.width
+                    height: limitPeriods.buttonHeight
+                    font.pixelSize: Style.font.caption
+                    verticalPadding: Style.space(2)
+                    // Not bound to root.info: a binding is re-asserted on every
+                    // status poll, so backspacing refilled the field mid-edit.
+                    // Seeded when the section opens instead.
+                    placeholderText: "5G, 500M; blank for off"
+                    foreground: root.barForeground
+                    onAccepted: {
+                      var v = text.trim()
+                      root.runAction([root.cli, "limit", v === "" ? "off" : v])
+                      root.limitEditing = false
+                    }
+                  }
+                }
+
+                Column {
+                  visible: parent.paired
+                  width: parent.cell
+                  spacing: Style.space(4)
+
+                  PanelSectionHeader {
+                    text: root.info.period === "days" ? "LENGTH" : "RENEWAL DAY"
+                    foreground: root.barForeground
+                    fontFamily: root.fontFamily
+                  }
+
+                  TextField {
+                    id: resetDayField
+                    visible: root.info.period !== "days"
+                    width: parent.width
+                    height: limitPeriods.buttonHeight
+                    font.pixelSize: Style.font.caption
+                    verticalPadding: Style.space(2)
+                    placeholderText: "1-31"
+                    foreground: root.barForeground
+                    onAccepted: root.runAction([root.cli, "limit", "day", text.trim()])
+                  }
+
+                  TextField {
+                    id: periodDaysField
+                    visible: root.info.period === "days"
+                    width: parent.width
+                    height: limitPeriods.buttonHeight
+                    font.pixelSize: Style.font.caption
+                    verticalPadding: Style.space(2)
+                    placeholderText: "days, from today"
+                    foreground: root.barForeground
+                    onAccepted: root.runAction([root.cli, "limit", "days", text.trim()])
+                  }
+                }
+              }
+
+
+
+              // Start date left, reset right: a full-width button for something
+              // used twice a month was the loudest thing in the editor.
+              // Zeroes the counter, and on a fixed-length bundle restarts the
+              // window too -- topping up buys new days as well as new bytes.
+              Item {
+                width: parent.width
+                implicitHeight: resetLink.implicitHeight
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: root.info.period === "days" && root.info.period_start
+                  text: "Started " + root.info.period_start
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  id: resetLink
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.info.period === "days" ? "Reset and restart" : "Reset counter"
+                  color: root.barForeground
+                  opacity: resetArea.containsMouse ? 1 : 0.6
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+
+                  MouseArea {
+                    id: resetArea
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      root.runAction([root.cli, "limit", "reset"])
+                      root.limitEditing = false
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          Item {
+            width: parent.width
+            implicitHeight: planUsed.implicitHeight
+
+            Text {
+              id: planUsed
+              anchors.left: parent.left
+              text: root.limitBytes > 0
+                // The limit is stored as typed, so "3g" comes back lowercase.
+                ? root.formatBytes(root.usedBytes) + " of "
+                  + ((root.info.limit || root.formatBytes(root.limitBytes)).toUpperCase())
+                  + (root.limitAck ? "  ·  cutoff off" : "")
+                : "Used: " + root.formatBytes(root.usedBytes)
+              color: root.usedFraction >= 1 ? root.urgent : root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              anchors.right: parent.right
+              text: root.nextResetLabel
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+        }
+
+        // NetworkManager down: say what is wrong instead of showing dead controls.
+        Text {
+          visible: !root.installed
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: "NetworkManager is not running — it owns the cellular connection."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        // ---------- Radio mode ----------
+        // The counterpart to the Wi-Fi panel's band selector. Bands are not
+        // useful here (this modem reports 64), but 3g/4g/5g is four choices and
+        // worth having when 5G is flaky.
+        PanelSeparator {
+          visible: root.hwPresent
+          foreground: root.barForeground
+        }
+
+        // Label and pills on one line, like the switch rows: the header was
+        // spending a whole line to caption four short buttons.
+        Item {
+          visible: root.hwPresent
+          width: parent.width
+          implicitHeight: Math.max(modeLabel.implicitHeight, modeRow.implicitHeight)
+
+          PanelSectionHeader {
+            id: modeLabel
+            text: "RADIO MODE"
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+          }
+
+          Row {
+            id: modeRow
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(4)
+            // Whatever the label leaves, less a gap so the two never touch.
+            readonly property real avail: Math.max(0, parent.width - modeLabel.implicitWidth - Style.space(10))
+            readonly property real cellWidth: (avail - spacing * (root.modeChips.length - 1)) / Math.max(1, root.modeChips.length)
+            opacity: root.busy ? 0.5 : 1
+
+            Repeater {
+              model: root.modeChips
+              Button {
+                required property var modelData
+                width: modeRow.cellWidth
+                // Sized down to sit with the switch rows above: this is a
+                // set-once preference, not a primary control like the SIM
+                // slot picker.
+                fontSize: Style.font.caption
+                verticalPadding: Style.space(2)
+                text: modelData.label
+                bordered: true
+                active: root.modesAllowed === modelData.match
+                foreground: root.barForeground
+                fontFamily: root.fontFamily
+                onClicked: if (root.modesAllowed !== modelData.match)
+                             root.runAction([root.cli, "mode", modelData.id])
+              }
+            }
+          }
+        }
+
+        // ---------- APN ----------
+        PanelSeparator { foreground: root.barForeground }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+
+          // Label left, current value right, in the same shape as RADIO MODE.
+          // The whole row is the target: three ways to set an APN is a lot of
+          // panel for something set once, so they stay folded until asked for.
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(apnLabel.implicitHeight, apnValue.implicitHeight)
+
+            PanelSectionHeader {
+              id: apnLabel
+              text: "APN"
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              opacity: apnArea.containsMouse ? 0.7 : 1
+            }
+
+            Text {
+              id: apnChevron
+              anchors.right: parent.right
+              anchors.verticalCenter: apnLabel.verticalCenter
+              anchors.verticalCenterOffset: Math.round(apnLabel.topPadding / 2)
+              text: root.carrierExpanded ? "󰅀" : "󰅂"
+              color: root.barForeground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              id: apnValue
+              anchors.right: apnChevron.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: apnLabel.verticalCenter
+              anchors.verticalCenterOffset: Math.round(apnLabel.topPadding / 2)
+              width: Math.max(0, parent.width - apnLabel.implicitWidth
+                                 - apnChevron.implicitWidth - Style.space(16))
+              horizontalAlignment: Text.AlignRight
+              elide: Text.ElideRight
+              text: root.info.apn || "from network"
+              color: root.barForeground
+              opacity: root.info.apn ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            MouseArea {
+              id: apnArea
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                root.carrierExpanded = !root.carrierExpanded
+                if (!root.carrierExpanded) root.apnEditing = false
+              }
+            }
+          }
+
+          Row {
+            id: carrierRow
+            visible: root.carrierExpanded
+            width: parent.width
+            spacing: Style.space(6)
+            readonly property real cellWidth: (width - spacing * 2) / 3
+
+            Button {
+              width: carrierRow.cellWidth
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              iconSize: Style.font.bodySmall
+              iconText: "󰐷"
+              text: "Detect"
+              tooltipText: "Read the carrier off the SIM and apply its APN"
+              bordered: true
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              // Detect needs no input and the panel shows the result, so run it
+              // in place rather than throwing a terminal over the panel.
+              onClicked: root.runAction(["sh", "-c", JSON.stringify(root.cli) + " carrier auto && " + JSON.stringify(root.cli) + " apply"])
+            }
+
+            Button {
+              width: carrierRow.cellWidth
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              iconSize: Style.font.bodySmall
+              iconText: "󰇧"
+              text: "Lookup"
+              tooltipText: "Find your carrier's APN in the provider database"
+              bordered: true
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: root.runDetached(root.cli + " carrier choose")
+            }
+
+            Button {
+              width: carrierRow.cellWidth
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              iconSize: Style.font.bodySmall
+              iconText: "󰑪"
+              text: "APN"
+              tooltipText: "Type an APN by hand"
+              bordered: true
+              active: root.apnEditing
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: {
+                root.apnEditing = !root.apnEditing
+                if (root.apnEditing) apnField.text = root.info.apn || ""
+                if (root.apnEditing) apnField.forceActiveFocus()
+              }
+            }
+
+          }
+
+          // Inline rather than a centered prompt: the panel already takes
+          // keyboard focus for its own navigation, and the Wi-Fi panel enters
+          // passphrases the same way. Collapsed to zero height when unused.
+          Item {
+            width: parent.width
+            clip: true
+            height: (root.carrierExpanded && root.apnEditing) ? apnField.implicitHeight : 0
+
+            TextField {
+              id: apnField
+              font.pixelSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              width: parent.width
+              placeholderText: "APN — blank lets the network choose"
+              foreground: root.barForeground
+              onAccepted: {
+                root.apnEditing = false
+                root.runAction(["sh", "-c", JSON.stringify(root.cli) + " apn " + JSON.stringify(text) + " && " + JSON.stringify(root.cli) + " apply"])
+              }
+            }
+          }
+        }
+
+        // ---------- Device ----------
+        PanelSeparator {
+          visible: root.hwPresent
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.hwPresent
+          width: parent.width
+          spacing: Style.space(10)
+
+          Item {
+            width: parent.width
+            implicitHeight: detailsHeader.implicitHeight
+
+            PanelSectionHeader {
+              id: detailsHeader
+              text: "DEVICE"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              anchors.left: parent.left
+              opacity: headerArea.containsMouse ? 0.7 : 1
+            }
+
+            // Chevron on the right, in the same shape as APN and SIM CARD, with
+            // the modem named beside it while collapsed. Expanded, the name is
+            // in the rows below and the space goes to the reveal toggle.
+            Text {
+              id: chevron
+              anchors.right: parent.right
+              anchors.verticalCenter: detailsHeader.verticalCenter
+              anchors.verticalCenterOffset: Math.round(detailsHeader.topPadding / 2)
+              text: root.deviceExpanded ? "󰅀" : "󰅂"
+              color: root.barForeground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              id: deviceName
+              visible: !root.deviceExpanded
+              anchors.right: chevron.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: detailsHeader.verticalCenter
+              anchors.verticalCenterOffset: Math.round(detailsHeader.topPadding / 2)
+              width: Math.max(0, parent.width - detailsHeader.implicitWidth
+                                 - chevron.implicitWidth - Style.space(16))
+              horizontalAlignment: Text.AlignRight
+              elide: Text.ElideRight
+              text: root.info.model || ""
+              color: root.barForeground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Button {
+              id: revealButton
+              visible: root.deviceExpanded
+              anchors.right: chevron.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: detailsHeader.verticalCenter
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              iconSize: Style.font.bodySmall
+              iconText: root.detailsRevealed ? "󰈉" : "󰛐"
+              tooltipText: root.detailsRevealed ? "Hide identifiers" : "Reveal identifiers"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: root.detailsRevealed = !root.detailsRevealed
+            }
+
+            MouseArea {
+              id: headerArea
+              anchors.left: parent.left
+              anchors.right: root.deviceExpanded ? revealButton.left : chevron.right
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.deviceExpanded = !root.deviceExpanded
+            }
+          }
+
+          // One column: ICCID is 19 digits and IMEI 15, which overflow a
+          // half-width cell and push into the next one.
+          Item {
+            width: parent.width
+            clip: true
+            // No height animation: the panel is a layer-shell surface, so
+            // animating this reconfigures the Wayland surface every frame and
+            // stalls input for the duration. Snap instead.
+            height: root.deviceExpanded ? deviceRows.implicitHeight : 0
+
+          Column {
+            id: deviceRows
+            width: parent.width
+            spacing: Style.spacing.labelGap
+
+            InfoPair { label: "Number"; value: root.maskId(root.info.number); copyValue: root.info.number || "" }
+            InfoPair { label: "IMEI"; value: root.maskId(root.info.imei); copyValue: root.info.imei || "" }
+            // A physical card has an ICCID; an unprovisioned eUICC has only an
+            // EID. Showing both means one is always blank.
+            InfoPair {
+              visible: !!root.info.iccid
+              label: "ICCID"
+              value: root.maskId(root.info.iccid)
+              copyValue: root.info.iccid || ""
+            }
+            // Only present on an eUICC; a physical card has no EID.
+            InfoPair {
+              visible: !!root.info.eid
+              label: "EID"
+              value: root.maskId(root.info.eid)
+              copyValue: root.info.eid || ""
+            }
+            InfoPair { label: "Carrier"; value: root.info.carrier_config || "—" }
+            InfoPair { label: "Modem"; value: root.info.model || "—" }
+            InfoPair { label: "Firmware"; value: root.info.firmware || "—" }
+          }
+          }
+        }
+
+        // ---------- SIM slot ----------
+        PanelSeparator { foreground: root.barForeground }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+
+          // What is in the slot, on the right of the title. On an eSIM that is
+          // the active profile: its nickname once the profiles have been read,
+          // otherwise the provider ModemManager reports for the card. Not the
+          // network operator -- an Airalo profile roaming on Verizon is
+          // "Airalo" here and "Verizon Wireless" in the hero.
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(simHeader.implicitHeight, simWho.implicitHeight)
+
+            PanelSectionHeader {
+              id: simHeader
+              text: "SIM CARD"
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              id: simWho
+              anchors.right: parent.right
+              anchors.verticalCenter: simHeader.verticalCenter
+              anchors.verticalCenterOffset: Math.round(simHeader.topPadding / 2)
+              width: Math.max(0, parent.width - simHeader.implicitWidth - Style.space(10))
+              horizontalAlignment: Text.AlignRight
+              elide: Text.ElideRight
+              text: root.simLabel
+              color: root.barForeground
+              opacity: text === "" ? 0 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          Row {
+            id: simRow
+            width: parent.width
+            spacing: Style.space(6)
+            // Three cells only when the eSIM is selected, since that is the
+            // only time the profiles button is there to fill one. Not equal
+            // thirds: "eSIM Profiles" is twice the label the slots carry and
+            // was running into its own padding.
+            readonly property int cells: root.info.slot === "2" ? 3 : 2
+            readonly property real usable: width - spacing * (cells - 1)
+            readonly property real cellWidth: cells === 3 ? usable * 0.28 : usable / 2
+            readonly property real wideWidth: usable - cellWidth * 2
+            // A slot switch is in flight — dim the row so the swallowed
+            // clicks read as "busy", not "broken".
+            opacity: root.busy ? 0.5 : 1
+
+            Button {
+              width: simRow.cellWidth
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              iconSize: Style.font.bodySmall
+              iconText: "󰒧"
+              text: root.info.slot1_sim === "no" ? "Physical · empty" : "Physical"
+              tooltipText: root.info.slot1_sim === "no" ? "No card in the slot" : ""
+              opacity: root.info.slot1_sim === "no" ? 0.55 : 1
+              bordered: true
+              active: root.info.slot === "1"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: if (root.info.slot !== "1") root.runAction([root.cli, "sim", "1"])
+            }
+
+            Button {
+              width: simRow.cellWidth
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              iconSize: Style.font.bodySmall
+              iconText: "󱤓"
+              text: root.info.slot2_sim === "no" ? "eSIM · empty" : "eSIM"
+              tooltipText: root.info.slot2_sim === "no" ? "No profile installed on the eSIM" : ""
+              opacity: root.info.slot2_sim === "no" ? 0.55 : 1
+              bordered: true
+              active: root.info.slot === "2"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: if (root.info.slot !== "2") root.runAction([root.cli, "sim", "2"])
+            }
+
+            // Sits with the slots because it acts on the card in one of them.
+            // The lock glyph says the click costs a prompt before it is spent;
+            // the tooltip says it also costs the connection, since lpac needs
+            // the AT port and ModemManager is stopped for the read.
+            Button {
+              visible: root.info.slot === "2"
+              width: simRow.wideWidth
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              iconSize: Style.font.bodySmall
+              iconText: "󰌾"
+              text: "eSIM Profiles"
+              tooltipText: "Stops the modem briefly to read the eSIM"
+              bordered: true
+              active: root.esimExpanded
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: {
+                root.esimExpanded = !root.esimExpanded
+                if (root.esimExpanded && root.profiles.length === 0) root.loadProfiles()
+              }
+            }
+          }
+        }
+
+
+          // Profiles on the eUICC. Collapsed until the header is clicked,
+          // because listing them stops ModemManager and needs a prompt.
+          Item {
+            width: parent.width
+            clip: true
+            height: root.esimExpanded ? esimCol.implicitHeight : 0
+
+            Column {
+              id: esimCol
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                visible: root.profilesLoading
+                width: parent.width
+                wrapMode: Text.WordWrap
+                // Says why the connection just dropped, at the moment it does.
+                text: "Reading the eSIM, briefly dropping data…"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                visible: !root.profilesLoading && root.profiles.length === 0
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.profileError
+                  ? root.profileError + "  Try Refresh."
+                  : "No profiles installed on this eSIM."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Repeater {
+                model: root.profiles
+                Row {
+                  id: profileRow
+                  required property var modelData
+                  width: esimCol.width
+                  spacing: Style.space(4)
+                  // Explicit chip width: Button.implicitWidth includes its
+                  // horizontal padding, so `width: height` does not actually
+                  // make a square and the last chip lands off the panel.
+                  readonly property real chip: Style.font.body * 2
+
+                  Button {
+                    id: profileName
+                    width: profileRow.width - profileRow.spacing * 2 - profileRow.chip * 2
+                    height: addBtn.height
+                    fontSize: Style.font.caption
+                    verticalPadding: Style.space(2)
+                    text: root.shortLabel(modelData.name, modelData.provider)
+                    tooltipText: (root.profileEnabled(modelData)
+                      ? "Active profile" : "Switch to this profile")
+                      + (modelData.class === "test" ? " (test profile)" : "")
+                    bordered: true
+                    active: root.profileEnabled(modelData)
+                    // Dim test profiles, but never the enabled one: the two
+                    // rules stacked cancelled the highlight out and the active
+                    // profile read as disabled.
+                    opacity: modelData.class === "test"
+                      && !root.profileEnabled(modelData) ? 0.6 : 1
+                    foreground: root.barForeground
+                    fontFamily: root.fontFamily
+                    onClicked: if (!root.profileEnabled(modelData)) {
+                      root.runAction([root.cli, "profile", "enable", modelData.iccid])
+                      root.applyProfileChange(modelData.iccid, "enable")
+                    }
+                  }
+
+                  Button {
+                    width: profileRow.chip
+                    height: addBtn.height
+                    iconSize: Style.font.caption
+                    fontSize: Style.font.caption
+                    verticalPadding: Style.space(2)
+                    horizontalPadding: Style.space(2)
+                    iconText: "󰑕"
+                    tooltipText: "Rename"
+                    bordered: true
+                    foreground: root.barForeground
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                      root.renamingIccid = root.renamingIccid === modelData.iccid
+                        ? "" : modelData.iccid
+                      if (root.renamingIccid !== "") {
+                        renameField.text = modelData.name || ""
+                        renameField.forceActiveFocus()
+                      }
+                    }
+                  }
+
+                  Button {
+                    width: profileRow.chip
+                    height: addBtn.height
+                    iconSize: Style.font.caption
+                    fontSize: Style.font.caption
+                    verticalPadding: Style.space(2)
+                    horizontalPadding: Style.space(2)
+                    iconText: "󰩹"
+                    // "Disable it first" describes a mechanism nobody asked
+                    // about; say what is actually true of the button.
+                    tooltipText: root.profileEnabled(modelData)
+                      ? "Can't delete the active profile — switch to another first"
+                      : "Delete this profile"
+                    bordered: true
+                    opacity: root.profileEnabled(modelData) ? 0.4 : 1
+                    foreground: root.barForeground
+                    fontFamily: root.fontFamily
+                    onClicked: if (!root.profileEnabled(modelData)) {
+                      root.runAction([root.cli, "profile", "delete", modelData.iccid])
+                      root.applyProfileChange(modelData.iccid, "delete")
+                    }
+                  }
+                }
+              }
+
+              Item {
+                width: parent.width
+                clip: true
+                height: root.renamingIccid !== "" ? renameField.implicitHeight : 0
+
+                TextField {
+                  id: renameField
+                  font.pixelSize: Style.font.caption
+                  verticalPadding: Style.space(2)
+                  width: parent.width
+                  placeholderText: "New name — Esc to cancel"
+                  foreground: root.barForeground
+                  Keys.onEscapePressed: { root.renamingIccid = ""; text = "" }
+                  onAccepted: {
+                    var target = root.renamingIccid
+                    root.renamingIccid = ""
+                    if (target !== "" && text.trim() !== "") {
+                      root.runAction([root.cli, "profile", "nickname", target, text.trim()])
+                      root.applyProfileChange(target, "rename", text.trim())
+                    }
+                    text = ""
+                  }
+                }
+              }
+
+              Row {
+                width: esimCol.width
+                spacing: Style.space(4)
+
+                Button {
+                  // The reference every other control in this area matches.
+                  // Left to size itself: a formula for this drifted from the
+                  // real height by the border reserve.
+                  id: addBtn
+                  width: (esimCol.width - Style.space(4)) / 2
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.space(2)
+                  iconText: "󰐕"
+                  text: "Add profile"
+                  tooltipText: "Install a new eSIM from an activation code"
+                  bordered: true
+                  active: root.addingProfile
+                  foreground: root.barForeground
+                  fontFamily: root.fontFamily
+                  onClicked: {
+                    root.addingProfile = !root.addingProfile
+                    if (root.addingProfile) codeField.forceActiveFocus()
+                  }
+                }
+
+                Button {
+                  width: (esimCol.width - Style.space(4)) / 2
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.space(2)
+                  iconText: "󰑐"
+                  text: "Refresh"
+                  tooltipText: "Re-read profiles from the eSIM"
+                  bordered: true
+                  foreground: root.barForeground
+                  fontFamily: root.fontFamily
+                  onClicked: { root.profiles = []; root.loadProfiles() }
+                }
+              }
+
+              Item {
+                width: parent.width
+                clip: true
+                height: root.addingProfile ? addRow.implicitHeight : 0
+
+                Row {
+                  id: addRow
+                  width: parent.width
+                  spacing: Style.space(4)
+                  readonly property real chip: Style.font.body * 2
+
+                  Button {
+                    width: parent.chip
+                    height: codeField.height
+                    fontSize: Style.font.caption
+                    verticalPadding: Style.space(3)
+                    horizontalPadding: Style.space(2)
+                    iconSize: Style.font.caption
+                    iconText: "󰐫"
+                    tooltipText: "Scan a QR code off the screen"
+                    bordered: true
+                    foreground: root.barForeground
+                    fontFamily: root.fontFamily
+                    // Detached, not runAction: slurp puts up its own
+                    // layer-shell surface, and as a child of the shell process
+                    // it lands beneath the panel -- running and waiting, but
+                    // invisible until something else takes focus.
+                    onClicked: {
+                      root.addingProfile = false
+                      root.runDetached(root.cli + " profile scan")
+                    }
+                  }
+
+                TextField {
+                  id: codeField
+                  font.pixelSize: Style.font.caption
+                  verticalPadding: Style.space(3)
+                  width: parent.width - parent.chip - parent.spacing
+                  placeholderText: "Paste code, or scan →"
+                  foreground: root.barForeground
+                  Keys.onEscapePressed: {
+                    root.addingProfile = false
+                    text = ""
+                  }
+                  onAccepted: {
+                    root.addingProfile = false
+                    if (text.trim() !== "") {
+                      root.runAction([root.cli, "profile", "download", text.trim()])
+                      root.profileError = "Downloaded. Refresh to see it."
+                    }
+                    text = ""
+                  }
+                }
+                }
+              }
+            }
+          }
+
+
+      }
+    }
+  }
+
+  // Label left, switch right, tooltip on the switch. Sized off the label so it
+  // reads as part of the header, and centered on the label's glyphs:
+  // PanelSectionHeader carries topPadding to protect Nerd Font overshoot, so a
+  // plain verticalCenter sits the switch visibly high.
+  component SwitchRow: Item {
+    id: switchRow
+    property string label: ""
+    property string tip: ""
+    property bool checked: false
+    signal flipped()
+
+    implicitHeight: Math.max(rowLabel.implicitHeight, rowSwitch.implicitHeight)
+
+    PanelSectionHeader {
+      id: rowLabel
+      text: switchRow.label
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      foreground: root.barForeground
+      fontFamily: root.fontFamily
+    }
+
+    ToggleSwitch {
+      id: rowSwitch
+      anchors.right: parent.right
+      trackHeight: Math.round(rowLabel.font.pixelSize * 1.2)
+      cursorPad: Style.space(3)
+      anchors.verticalCenter: rowLabel.verticalCenter
+      anchors.verticalCenterOffset: Math.round(rowLabel.topPadding / 2)
+      checked: switchRow.checked
+      busy: root.busy
+      foreground: root.barForeground
+      onToggled: switchRow.flipped()
+
+      PanelToolTip {
+        visible: rowSwitch.containsMouse && switchRow.tip !== ""
+        text: switchRow.tip
+        fontFamily: root.fontFamily
+      }
+    }
+  }
+
+  component InfoPair: Row {
+    property string label: ""
+    property string value: ""
+    property string copyValue: ""
+    property color valueColor: root.barForeground
+    readonly property bool copyable: copyValue !== ""
+
+    width: parent.width
+    spacing: Style.space(8)
+
+    Text {
+      id: labelText
+      text: parent.label
+      color: root.barForeground
+      opacity: 0.6
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+
+    // Right-aligned in whatever the label leaves, and elided rather than
+    // allowed to run into the neighbouring column: operator names are long and
+    // this modem truncates them at 20 characters already.
+    Text {
+      id: valueText
+      width: Math.max(0, parent.width - labelText.implicitWidth - parent.spacing)
+      horizontalAlignment: Text.AlignRight
+      elide: Text.ElideRight
+      text: root.copied !== "" && root.copied === parent.copyValue ? "copied" : parent.value
+      color: parent.valueColor
+      opacity: copyArea.containsMouse ? 0.7 : 1
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+
+      MouseArea {
+        id: copyArea
+        anchors.fill: parent
+        enabled: valueText.parent.copyable
+        hoverEnabled: enabled
+        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+        onClicked: root.copyValue(valueText.parent.copyValue)
+      }
+    }
+  }
+}

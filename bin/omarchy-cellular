@@ -1,0 +1,2251 @@
+#!/bin/bash
+# omarchy:summary=Control the cellular modem.
+#
+# User-facing front end for Omarchy's cellular support. Modem state comes from
+# ModemManager; the connection itself is a NetworkManager gsm profile, which
+# nmcli manages as the console user via polkit. Nothing here needs root.
+
+set -uo pipefail
+
+CONFIG="$HOME/.config/omarchy/cellular.conf"
+NM_CONN="${OMARCHY_CELLULAR_CONN:-Omarchy Cellular}"
+# read_state reuses STATE for the modem state, so the directory gets its own
+# name; keep both pointing at the same place.
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cellular"
+STATE_DIR=$STATE
+USAGE_FILE="$STATE_DIR/usage"
+PLUGIN_DIR="$HOME/.config/omarchy/plugins/relctx.cellular"
+
+# Where to point the user for repairs: an explicit override, then the shell
+# plugin copy (what `omarchy plugin add` leaves behind), then the dev checkout.
+if [[ -n ${OMARCHY_CELLULAR_REPO:-} ]]; then
+  REPO_HINT=$OMARCHY_CELLULAR_REPO
+elif [[ -f $PLUGIN_DIR/manifest.json ]]; then
+  REPO_HINT=$PLUGIN_DIR
+else
+  REPO_HINT="$HOME/Projects/omarchy-cellular"
+fi
+
+# ---------------------------------------------------------------- NetworkManager
+# The connection layer. NM owns the bearer, addressing and routing; ModemManager
+# still owns the modem itself, so read_state and the SIM commands are unchanged.
+
+nm_running() { systemctl is-active --quiet NetworkManager 2>/dev/null; }
+
+# The gsm device NM exposes for the modem, e.g. wwan0mbim0.
+nm_device() {
+  nmcli -t -g DEVICE,TYPE device status 2>/dev/null |
+    awk -F: '$2 == "gsm" { print $1; exit }'
+}
+
+nm_conn_exists() {
+  nmcli -t -g NAME connection show 2>/dev/null | grep -qxF "$NM_CONN"
+}
+
+# "--active" also lists connections that are merely activating, which on a SIM
+# that cannot attach is a permanent state. Ask for the activation state itself.
+nm_is_active() {
+  [[ "$(nmcli -t -f GENERAL.STATE connection show "$NM_CONN" 2>/dev/null)" == *:activated ]]
+}
+
+# Create the profile if it is missing. Needs a gsm device to bind to, which
+# means the modem has to be enumerated first.
+nm_ensure() {
+  nm_conn_exists && return 0
+  local dev
+  dev=$(nm_device) || true
+  [[ -n $dev ]] || {
+    echo "No gsm device found — is the modem enumerated? (mmcli -L)" >&2
+    return 1
+  }
+  nmcli connection add type gsm ifname "$dev" con-name "$NM_CONN" \
+    gsm.apn "$(get_cfg APN)" connection.autoconnect no \
+    connection.permissions "user:$USER" >/dev/null || return 1
+}
+
+# Push cellular.conf onto the profile. Idempotent; safe to call on every change.
+nm_apply() {
+  nm_ensure || return 1
+
+  local v4=auto v6=auto
+  case "$(get_cfg IP_TYPE)" in
+  ipv4) v6=disabled ;;
+  ipv6) v4=disabled ;;
+  esac
+
+  # ALLOW_ROAMING is the inverse of NM's home-only.
+  local home_only=no
+  [[ "$(get_cfg ALLOW_ROAMING)" == no ]] && home_only=yes
+
+  local auto=no
+  [[ "$(get_cfg AUTOCONNECT)" == yes ]] && auto=yes
+
+  local -a args=(
+    gsm.apn "$(get_cfg APN)"
+    gsm.username "$(get_cfg APN_USER)"
+    gsm.password "$(get_cfg APN_PASS)"
+    gsm.pin "$(get_cfg PIN)"
+    gsm.home-only "$home_only"
+    gsm.network-id "$(get_cfg OPERATOR_ID)"
+    ipv4.method "$v4"
+    ipv6.method "$v6"
+    connection.autoconnect "$auto"
+    # The plugin is user-scoped, so its connection should be too. Without this
+    # the profile is stored system-wide and offered to every user on the
+    # machine, which is not what installing something into ~/.config asked for.
+    connection.permissions "user:$USER"
+  )
+
+  # An empty metric means "leave NM's default", which is already 700 for gsm
+  # against 600 for wifi -- the failover order ROUTE_METRIC documents.
+  local metric
+  if [[ $(get_cfg PREFER_CELLULAR) == yes ]]; then
+    metric=$(preferred_metric)
+  else
+    metric=$(get_cfg ROUTE_METRIC)
+  fi
+  [[ -n $metric ]] && args+=(ipv4.route-metric "$metric" ipv6.route-metric "$metric")
+
+  # NetworkManager already guesses yes for a modem, but a guess is weaker than
+  # the explicit value and not every consumer honors it. Say it outright.
+  # There is no third "let NM decide" setting: its guess here is yes, so that
+  # would be a second name for the default.
+  [[ $(get_cfg METERED) == no ]] &&
+    args+=(connection.metered no) ||
+    args+=(connection.metered yes)
+
+  nmcli connection modify "$NM_CONN" "${args[@]}" >/dev/null || return 1
+}
+
+# 100 for ethernet, 600 for wifi and 700 for us are NetworkManager's per-device
+# defaults, not rules: any profile can set ipv4.route-metric, and bridges, VMs
+# and tethered phones land wherever their profile says. So read what is in the
+# table and go under the lowest of it, rather than assuming anyone's defaults.
+#
+# VPNs are deliberately not considered. WireGuard and Tailscale route by policy
+# rule, which the kernel evaluates before the main table, so they keep winning
+# whatever is set here -- which is what a VPN is for.
+preferred_metric() {
+  # Skip our own route, or each apply would read the metric it set last time and
+  # go under it again: 590, 580, 570. Matched on the interface prefix rather
+  # than nm_device, because NetworkManager names the device wwan0mbim0 for a
+  # multiplexed session while the route lands on the wwan0 parent.
+  local lowest
+  lowest=$(ip -4 route show default 2>/dev/null |
+    awk '
+      {
+        dev = ""
+        for (i = 1; i <= NF; i++) if ($i == "dev") dev = $(i + 1)
+        if (dev ~ /^ww/) next
+        for (i = 1; i <= NF; i++) if ($i == "metric") { print $(i + 1); next }
+        print 0   # a default route with no metric is metric 0
+      }' | sort -n | head -1)
+
+  # Nothing else holds a default route, so anything wins; keep the configured
+  # value rather than inventing a number.
+  [[ -n $lowest ]] || {
+    get_cfg ROUTE_METRIC
+    return
+  }
+  # A wide margin rather than -1: something appearing just under us would
+  # silently take the traffic back, and a round number is easier to recognize
+  # in `ip route` than 590. Floored at 10 to stay clear of hand-set routes --
+  # with ethernet at NetworkManager's default of 100 this lands on the floor,
+  # which still wins, just by less.
+  local want=$((lowest - 100))
+  ((want < 10)) && want=10
+  printf '%s' "$want"
+}
+
+# The interface the connection's addresses are on, which is what shows up in
+# the routing table. Not nm_device: that reports wwan0mbim0 for a multiplexed
+# session while the route lands on wwan0.
+nm_ip_iface() {
+  ip -4 route show default 2>/dev/null |
+    awk '{ for (i = 1; i <= NF; i++) if ($i == "dev" && $(i + 1) ~ /^ww/) { print $(i + 1); exit } }'
+}
+
+# What the kernel would actually use, which accounts for rules, tables and
+# metrics together -- comparing metrics alone does not.
+route_via() {
+  ip route get 1.1.1.1 2>/dev/null |
+    awk '{ for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+}
+
+# ------------------------------------------------------------ modem pre-flight
+# NetworkManager raises the bearer, but it cannot fix a modem that is rfkilled,
+# parked in low power, or (after a resume) left without an MBIM/QMI control
+# port. Do that first, then hand over.
+
+# One dump per invocation. read_state, read_details and failure_reason each
+# wanted their own, which meant several mmcli spawns per panel refresh; every
+# one of those is a chance to catch the modem mid-teardown, where mmcli
+# segfaults on MM_IS_MODEM rather than failing cleanly.
+# Cached in a file rather than a variable: every caller reads through $(...),
+# which is a subshell, so an assignment would never reach the parent. Keyed on
+# PID and removed on exit, so it lives exactly one invocation.
+CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-cellular.$$"
+trap 'rm -rf "$CACHE_DIR"' EXIT
+modem_dump() {
+  local f="$CACHE_DIR/dump.$1"
+  [[ -s $f ]] || {
+    mkdir -p "$CACHE_DIR"
+    mmcli -m "$1" -K 2>/dev/null >"$f"
+  }
+  cat "$f" 2>/dev/null
+}
+
+# modem_index and modem_dump cache for the life of one invocation, which is
+# what keeps the panel to a single mmcli call. Anything that makes the modem
+# re-enumerate has to drop that cache or it keeps reporting the old object.
+cache_flush() {
+  rm -f "$CACHE_DIR/index" "$CACHE_DIR"/dump.* 2>/dev/null
+}
+
+# The modem object disappears and comes back around resets and slot switches.
+wait_for_modem() {
+  local deadline=$((SECONDS + ${1:-30})) idx
+  while ((SECONDS < deadline)); do
+    idx=$(modem_index)
+    [[ -n $idx ]] && { printf '%s' "$idx"; return 0; }
+    sleep 1
+  done
+  return 1
+}
+
+# For commands a person invoked. Slot switches, mode changes and resets make the
+# modem vanish and come back under a new index, so a single lookup right after
+# one reports no modem at all -- which is what `sim 1 && sim 2` did, failing the
+# first half and short-circuiting the second. The panel's own polling must stay
+# single-shot: it runs every ten seconds and cannot block.
+modem_index_wait() {
+  local idx
+  idx=$(modem_index)
+  [[ -n $idx ]] && { printf '%s' "$idx"; return 0; }
+  wait_for_modem "${1:-20}"
+}
+
+# ModemManager numbers modems monotonically, so after a re-plug the old index
+# never comes back; anything different (and present) is the fresh object.
+wait_for_new_modem() {
+  local old="$1" deadline=$((SECONDS + ${2:-60})) idx
+  while ((SECONDS < deadline)); do
+    cache_flush
+    idx=$(modem_index)
+    [[ -n $idx && $idx != "$old" ]] && { printf '%s' "$idx"; return 0; }
+    sleep 1
+  done
+  return 1
+}
+
+# After suspend a USB modem can come back without re-enumerating. ModemManager
+# then recreates the modem object without re-probing cdc-wdm0 and drives it
+# over AT only. An AT-only modem registers fine but can never raise a bearer.
+has_control_port() {
+  modem_dump "$1" | grep -qE '\((mbim|qmi)\)$'
+}
+
+# A wedged radio: the modem enumerates and enables, but the RF side is dead.
+# Registration never leaves idle, signal quality stays 0, and a network scan
+# fails with PhoneFailure. Seen after a run of ModemManager restarts, which is
+# exactly what eSIM profile work does to it.
+radio_wedged() {
+  local dump
+  dump=$(mmcli -m "$1" -K 2>/dev/null) || return 1
+  [[ $(kv "$dump" modem.generic.state) == enabled ]] &&
+    [[ $(kv "$dump" modem.3gpp.registration-state) == idle ]] &&
+    [[ -z $(kv "$dump" modem.generic.signal-quality.value) ||
+      $(kv "$dump" modem.generic.signal-quality.value) == 0 ]]
+}
+
+# A healthy modem takes up to a minute to register after ModemManager restarts,
+# so this only fires on a sustained window of idle-with-no-signal -- today it
+# sat that way for ten minutes. Unlike the control-port repair this needs no
+# root: ModemManager gives the active session Device.Control (allow_active=yes),
+# so the reset is silent. Prints the (possibly new) modem index.
+ensure_radio() {
+  local idx="$1" window="${2:-60}" deadline=$((SECONDS + ${2:-60}))
+  while ((SECONDS < deadline)); do
+    radio_wedged "$idx" || { printf '%s' "$idx"; return 0; }
+    sleep 5
+  done
+
+  echo "Modem enumerated but the radio is dead (${window}s idle, no signal); resetting…" >&2
+  notify "Resetting the modem — the radio came back dead"
+  mmcli -m "$idx" --reset >/dev/null 2>&1 || { printf '%s' "$idx"; return 1; }
+  cache_flush
+  idx=$(wait_for_new_modem "$idx" 90) || return 1
+  printf '%s' "$idx"
+}
+
+# Prints the (possibly new) modem index. Both repairs need root, so they go
+# through pkexec; neither runs unless the control port has actually gone.
+ensure_control_port() {
+  local idx="$1" dev
+  has_control_port "$idx" && { printf '%s' "$idx"; return 0; }
+
+  # No cdc-wdm node at all means this modem genuinely is AT-driven, or it is
+  # MHI/PCIe where there is nothing to re-plug. Not our stale-resume case.
+  if ! compgen -G '/dev/cdc-wdm*' >/dev/null; then
+    printf '%s' "$idx"
+    return 0
+  fi
+
+  # mmcli --reset is no help: with the control port gone the modem is AT-only
+  # and reports reset as unsupported. Re-authorizing the USB device is a soft
+  # re-plug instead, so every port is torn down, re-added and re-probed.
+  dev=$(kv "$(modem_dump "$idx")" modem.generic.device)
+  if [[ -f $dev/authorized ]]; then
+    echo "Modem lost its MBIM/QMI control port after resume; re-plugging on USB…" >&2
+    if pkexec sh -c "echo 0 >'$dev/authorized'; sleep 2; echo 1 >'$dev/authorized'"; then
+      if idx=$(wait_for_new_modem "$idx" 60) && has_control_port "$idx"; then
+        printf '%s' "$idx"
+        return 0
+      fi
+    fi
+  fi
+
+  echo "USB re-plug did not restore the control port; restarting ModemManager…" >&2
+  pkexec systemctl restart ModemManager.service || {
+    echo "could not restart ModemManager" >&2
+    return 1
+  }
+  idx=$(wait_for_modem 60) || {
+    echo "modem did not come back after the ModemManager restart" >&2
+    return 1
+  }
+  has_control_port "$idx" || {
+    echo "modem still has no control port; a full power cycle may be needed" >&2
+    return 1
+  }
+  printf '%s' "$idx"
+}
+
+# Unblock, wait for enumeration, wake the radio and repair the control port.
+# The SIM slot is deliberately not switched here: that needs pkexec, and
+# prompting on every connect to set a slot the user already chose would be
+# obnoxious. `omarchy-cellular sim` sets it, and doctor flags a mismatch.
+nm_preflight() {
+  local idx
+  rfkill unblock wwan 2>/dev/null
+  idx=$(wait_for_modem 45) || {
+    echo "No cellular modem found. Is the card enabled in BIOS?" >&2
+    return 1
+  }
+  mmcli -m "$idx" --set-power-state-on >/dev/null 2>&1
+  idx=$(ensure_control_port "$idx") || return 1
+  mmcli -m "$idx" --enable >/dev/null 2>&1
+  # A dead radio fails to connect over and over with nothing to show for it.
+  # Short window here: the user is waiting on a click, and nm_up has its own
+  # 45s to spend afterwards.
+  idx=$(ensure_radio "$idx" 20) || return 1
+  return 0
+}
+
+# nmcli waits 90s by default, which leaves "Connecting…" on screen with no
+# feedback and makes the failure path effectively unreachable. A registration
+# that is going to work does so well inside this.
+NM_UP_WAIT="${OMARCHY_CELLULAR_WAIT:-45}"
+nm_up() {
+  nm_apply && nm_preflight &&
+    nmcli --wait "$NM_UP_WAIT" connection up "$NM_CONN" >/dev/null
+}
+nm_down() { nmcli connection down "$NM_CONN" >/dev/null 2>&1; }
+
+nm_autoconnect_get() {
+  [[ "$(nmcli -t -g connection.autoconnect connection show "$NM_CONN" 2>/dev/null)" == yes ]]
+}
+
+nm_autoconnect_set() {
+  nm_ensure || return 1
+  nmcli connection modify "$NM_CONN" connection.autoconnect "$1" >/dev/null
+}
+
+kv() {
+  awk -v key="$2" -F: '
+    { k = $1; gsub(/[ \t]+$/, "", k)
+      if (k == key) { sub(/^[^:]*:[ \t]*/, ""); if ($0 == "--") exit; print; exit } }
+  ' <<<"$1"
+}
+
+modem_index() {
+  local f="$CACHE_DIR/index"
+  [[ -s $f ]] || {
+    mkdir -p "$CACHE_DIR"
+    mmcli -L -K 2>/dev/null | sed -n 's|.*/Modem/\([0-9]\+\).*|\1|p' | head -1 >"$f"
+  }
+  cat "$f" 2>/dev/null
+}
+
+# The panel shows connecting/failed state itself, so actions it starts would
+# otherwise raise a toast that overlays the very panel you are looking at.
+notify() {
+  [[ ${OMARCHY_CELLULAR_QUIET:-0} == 1 ]] && return 0
+  notify-send -u low "Cellular" "$1" 2>/dev/null
+}
+
+# install.sh used to seed this; with the plugin installed by `omarchy plugin
+# add` there is no install step, so create it on first use instead. 600 because
+# it can hold a SIM PIN.
+ensure_cfg() {
+  [[ -e $CONFIG ]] && return 0
+  local template="$PLUGIN_DIR/config/cellular.conf"
+  [[ -f $template ]] || template="${OMARCHY_CELLULAR_REPO:-$HOME/Projects/omarchy-cellular}/config/cellular.conf"
+  [[ -f $template ]] || return 0
+  mkdir -p "$(dirname "$CONFIG")"
+  install -m 600 "$template" "$CONFIG"
+}
+
+get_cfg() {
+  ensure_cfg
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=//p" "$CONFIG" 2>/dev/null | tail -1 |
+    sed -e 's/[[:space:]]\+#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+set_cfg() {
+  local key="$1" val="$2"
+  ensure_cfg
+  if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$CONFIG" 2>/dev/null; then
+    sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key}=${val}|" "$CONFIG"
+  else
+    printf '%s=%s\n' "$key" "$val" >>"$CONFIG"
+  fi
+}
+
+# Collapses the modem into one of: absent, disabled, searching, registered,
+# connected — plus operator, access technology and signal strength.
+# Exact field match: "unblocked" contains "blocked" as a substring, so a naive
+# grep reports every working modem as switched off.
+wwan_blocked() {
+  rfkill --output SOFT --noheadings list wwan 2>/dev/null |
+    awk '$1 == "blocked" { found = 1 } END { exit !found }'
+}
+
+# `absent` from mmcli does not mean "no WWAN card": ModemManager needs upwards
+# of a minute to probe the ports at boot, and the modem object briefly vanishes
+# around suspend and SIM-slot switches. rfkill and sysfs still see the hardware
+# through all of that, so use them to tell "not probed yet" from "no card".
+wwan_hw_present() {
+  [[ -n $(rfkill list wwan 2>/dev/null) ]] && return 0
+  compgen -G '/sys/class/net/ww*' >/dev/null && return 0
+  compgen -G '/dev/cdc-wdm*' >/dev/null
+}
+
+read_state() {
+  STATE=absent OPERATOR="" TECH="" SIGNAL=0 IFACE="" IPADDR="" ACTIVE_SLOT="" REG_STATE=""
+  SLOT1_SIM="" SLOT2_SIM=""
+
+  # A soft-blocked radio is a deliberate "off", not a modem that is missing or
+  # hunting for a network — and while blocked the modem may vanish from mmcli.
+  if wwan_blocked; then
+    STATE=disabled
+    return 0
+  fi
+
+  local idx dump
+  idx=$(modem_index)
+  [[ -n $idx ]] || return 0
+  MODEM=$idx
+
+  dump=$(modem_dump "$idx")
+  OPERATOR=$(kv "$dump" modem.3gpp.operator-name)
+  # access-technologies is a list, even when the modem reports just one.
+  TECH=$(kv "$dump" "modem.generic.access-technologies.value[1]" | tr '[:lower:]' '[:upper:]')
+  SIGNAL=$(kv "$dump" modem.generic.signal-quality.value)
+  SIGNAL=${SIGNAL:-0}
+
+  local mstate
+  mstate=$(kv "$dump" modem.generic.state)
+  # Global: the panel reports roaming, which is the one state Wi-Fi has no
+  # analogue for and the one that costs money.
+  REG_STATE=$(kv "$dump" modem.3gpp.registration-state)
+  local reg=$REG_STATE
+
+  # Which slots actually hold a SIM. An empty slot reports the path "/";
+  # the panel uses this to mark a blank eSIM before anyone clicks it.
+  local p1 p2
+  p1=$(kv "$dump" "modem.generic.sim-slots.value[1]")
+  p2=$(kv "$dump" "modem.generic.sim-slots.value[2]")
+  [[ -n $p1 ]] && { [[ $p1 == / ]] && SLOT1_SIM=no || SLOT1_SIM=yes; }
+  [[ -n $p2 ]] && { [[ $p2 == / ]] && SLOT2_SIM=no || SLOT2_SIM=yes; }
+
+  # An empty active SIM slot reports the path "/" — a blank eSIM, typically.
+  # The modem then hunts for a network forever, which looks exactly like poor
+  # coverage; say what is actually wrong instead of "searching".
+  local pslot spath
+  pslot=$(kv "$dump" modem.generic.primary-sim-slot)
+  if [[ $pslot =~ ^[0-9]+$ && $mstate != connected ]]; then
+    spath=$(kv "$dump" "modem.generic.sim-slots.value[$pslot]")
+    if [[ $spath == / ]]; then
+      STATE=nosim
+      ACTIVE_SLOT=$pslot
+      return 0
+    fi
+  fi
+
+  case $mstate in
+  connected)
+    STATE=connected
+    IFACE=$(sed -n 's/^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (net)$/\1/p' <<<"$dump" | head -1)
+    [[ -n $IFACE ]] && IPADDR=$(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}')
+    ;;
+  registered | disconnecting | connecting) STATE=registered ;;
+  enabled | searching)
+    [[ $reg == home || $reg == roaming ]] && STATE=registered || STATE=searching
+    ;;
+  locked) STATE=locked ;;
+  *) STATE=disabled ;;
+  esac
+}
+
+# Always a cellular-bars glyph, so the icon's shape never changes — only how many
+# bars are filled. States that carry no signal show the empty outline and get
+# dimmed by CSS instead of switching to a different symbol.
+#
+#   U+F08BF md-signal_cellular_outline   empty
+#   U+F08BC md-signal_cellular_1         1/3
+#   U+F08BD md-signal_cellular_2         2/3
+#   U+F08BE md-signal_cellular_3         full
+signal_icon() {
+  case $STATE in
+  absent | disabled | locked | searching | nosim) printf '\U000F08BF' ;;
+  *)
+    if ((SIGNAL >= 67)); then printf '\U000F08BE'
+    elif ((SIGNAL >= 34)); then printf '\U000F08BD'
+    elif ((SIGNAL > 0)); then printf '\U000F08BC'
+    else printf '\U000F08BF'
+    fi
+    ;;
+  esac
+}
+
+cmd_status() {
+  read_state
+  case $STATE in
+  absent)
+    echo "No cellular modem detected."
+    return 1
+    ;;
+  disabled) echo "Cellular: off" ;;
+  nosim)
+    if [[ $ACTIVE_SLOT == 2 ]]; then
+      echo "Cellular: the eSIM (slot 2) is empty — no profile is installed on it."
+      echo "  Install one with an LPA client (e.g. lpac), or switch back: omarchy-cellular sim 1"
+    else
+      echo "Cellular: SIM slot ${ACTIVE_SLOT:-?} is empty — insert a card or switch slots."
+    fi
+    ;;
+  locked) echo "Cellular: SIM locked (PIN required)" ;;
+  searching) echo "Cellular: searching for network (signal ${SIGNAL}%)" ;;
+  registered) echo "Cellular: registered on ${OPERATOR:-unknown}, not connected (signal ${SIGNAL}%)" ;;
+  connected)
+    echo "Cellular: connected"
+    echo "  operator:  ${OPERATOR:-unknown}"
+    echo "  technology: ${TECH:-unknown}"
+    echo "  signal:    ${SIGNAL}%"
+    echo "  interface: ${IFACE:-unknown}${IPADDR:+  ($IPADDR)}"
+    ;;
+  esac
+  return 0
+}
+
+# Waybar-style JSON status: {text, tooltip, class, percentage}. Consumed by
+# the shell bar widget (shell/BarWidget.qml); the format predates it — it is
+# what the waybar module ate in Omarchy 3, and there was no reason to change.
+cmd_json() {
+  read_state
+  # The bar polls this every few seconds, which makes it the data meter's
+  # heartbeat: usage accrues and the limit is enforced on every poll.
+  meter_update
+  # Empty text hides the module entirely — but only on machines with no modem.
+  # A card that merely has not been probed yet keeps its spot in the bar, or
+  # the icon would blink out at every boot and resume.
+  if [[ $STATE == absent ]]; then
+    if wwan_hw_present; then
+      printf '{"text":"\U000F08BF","tooltip":"Modem starting…","class":"searching","percentage":0}\n'
+    else
+      echo '{"text":"","tooltip":"","class":"absent"}'
+    fi
+    return 0
+  fi
+
+  local tooltip
+  case $STATE in
+  disabled)
+    if ((LIMIT_BYTES > 0 && USED_BYTES >= LIMIT_BYTES)); then
+      tooltip="Data limit reached — cellular off"
+    else
+      tooltip="Cellular off"
+    fi
+    ;;
+  locked) tooltip="SIM locked — PIN required" ;;
+  nosim)
+    if [[ $ACTIVE_SLOT == 2 ]]; then
+      tooltip="eSIM is empty — no profile installed"
+    else
+      tooltip="SIM slot ${ACTIVE_SLOT:-?} is empty"
+    fi
+    ;;
+  searching) tooltip="Searching for network" ;;
+  registered) tooltip="${OPERATOR:-Registered} — not connected" ;;
+  connected) tooltip="${OPERATOR:-Connected}${TECH:+ · $TECH} · ${SIGNAL}%${IPADDR:+\\n$IPADDR}" ;;
+  esac
+
+  printf '{"text":"%s","tooltip":"%s","class":"%s","percentage":%s}\n' \
+    "$(signal_icon)" "$tooltip" "$STATE" "${SIGNAL:-0}"
+}
+
+# ------------------------------------------------------------- data limit
+#
+# Kernel byte counters vanish on reboot and interface re-creation, so usage
+# is accumulated into $USAGE_FILE as deltas between successive samples. The
+# meter runs on every bar poll (~10s), which also makes it the enforcement
+# point: reach the limit and cellular is cut off with a notification.
+
+# DATA_LIMIT accepts 5G / 1.5G / 500M / 500MB / off. Prints bytes, 0 = off.
+limit_bytes() {
+  local v
+  v=$(get_cfg DATA_LIMIT)
+  [[ -n $v && ${v,,} != off ]] || {
+    echo 0
+    return
+  }
+  awk -v s="$v" 'BEGIN {
+    n = s
+    sub(/[GgMmKk][Bb]?$/, "", n)
+    if (n !~ /^[0-9]+(\.[0-9]+)?$/) { print 0; exit }
+    u = toupper(substr(s, length(n) + 1, 1))
+    m = 0
+    if (u == "G") m = 1024 ^ 3
+    else if (u == "M") m = 1024 ^ 2
+    else if (u == "K") m = 1024
+    printf "%.0f", n * m
+  }'
+}
+
+fmt_bytes() {
+  awk -v n="$1" 'BEGIN {
+    if (n < 1024) printf "%d B", n
+    else if (n < 1024 ^ 2) printf "%.1f KB", n / 1024
+    else if (n < 1024 ^ 3) printf "%.1f MB", n / 1024 ^ 2
+    else printf "%.2f GB", n / 1024 ^ 3
+  }'
+}
+
+# Renewal day 31 in a 30-day month lands on the month's last day.
+clamp_day() { # <YYYY-MM> <day>
+  local dim=$(date -d "$1-01 +1 month -1 day" +%-d) d=$2
+  ((d > dim)) && d=$dim
+  printf '%s-%02d' "$1" "$d"
+}
+
+# Sets PERIOD_START and PERIOD_NEXT (both YYYY-MM-DD) for the current
+# billing period: the day the package renews each month, or midnight for
+# daily plans. ISO dates compare correctly as strings.
+period_bounds() {
+  local period day ym start
+  period=$(get_cfg DATA_PERIOD)
+  if [[ ${period:-monthly} == daily ]]; then
+    PERIOD_START=$(date +%F)
+    PERIOD_NEXT=$(date -d tomorrow +%F)
+    return
+  fi
+  # Prepaid bundles are sold as "N days from activation", which no day-of-month
+  # can express. Roll a fixed-length window forward from the activation date.
+  if [[ $period == days ]]; then
+    local len anchor elapsed windows
+    len=$(get_cfg DATA_DAYS)
+    [[ $len =~ ^[0-9]+$ ]] && ((len > 0)) || len=30
+    anchor=$(get_cfg DATA_START)
+    [[ $anchor =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+      anchor=$(date +%F)
+      set_cfg DATA_START "$anchor"
+    }
+    elapsed=$(((($(date +%s) - $(date -d "$anchor" +%s)) / 86400)))
+    ((elapsed < 0)) && elapsed=0
+    windows=$((elapsed / len))
+    PERIOD_START=$(date -d "$anchor +$((windows * len)) days" +%F)
+    PERIOD_NEXT=$(date -d "$PERIOD_START +$len days" +%F)
+    return
+  fi
+  day=$(get_cfg DATA_RESET_DAY)
+  [[ $day =~ ^[0-9]+$ ]] || day=1
+  ((day < 1)) && day=1
+  ((day > 31)) && day=31
+  ym=$(date +%Y-%m)
+  start=$(clamp_day "$ym" "$day")
+  if [[ $(date +%F) < $start ]]; then
+    PERIOD_START=$(clamp_day "$(date -d "$ym-01 -1 month" +%Y-%m)" "$day")
+    PERIOD_NEXT=$start
+  else
+    PERIOD_START=$start
+    PERIOD_NEXT=$(clamp_day "$(date -d "$ym-01 +1 month" +%Y-%m)" "$day")
+  fi
+}
+
+meter_iface() {
+  [[ -n ${IFACE:-} ]] && {
+    echo "$IFACE"
+    return 0
+  }
+  local i
+  for i in /sys/class/net/ww*; do
+    [[ -e $i ]] && {
+      basename "$i"
+      return 0
+    }
+  done
+  return 1
+}
+
+# Accumulate usage and enforce the limit. Sets USED_BYTES, LIMIT_BYTES,
+# LIMIT_ACK. Expects read_state to have run (uses the modem STATE/IFACE).
+meter_update() {
+  local iface cur_rx cur_tx d_rx d_tx have_state=0
+  local u_start="" u_end="" u_rx=0 u_tx=0 u_lrx=0 u_ltx=0 u_ack=0
+  mkdir -p "$STATE_DIR"
+  period_bounds
+
+  if [[ -r $USAGE_FILE ]]; then
+    have_state=1
+    while IFS='=' read -r k v; do
+      case $k in
+      period_start) u_start=$v ;;
+      period_end) u_end=$v ;;
+      rx) u_rx=$v ;;
+      tx) u_tx=$v ;;
+      last_rx) u_lrx=$v ;;
+      last_tx) u_ltx=$v ;;
+      ack) u_ack=$v ;;
+      esac
+    done <"$USAGE_FILE"
+  fi
+
+  # Reset when the period actually renewed, which means the stored end date has
+  # arrived -- not merely when the computed start moved. Changing the renewal
+  # day, or switching monthly/daily/days, moves the start too, and zeroing on
+  # that threw the month's usage away for looking at the settings.
+  #
+  # Counter snapshots are kept either way: the kernel counters did not reset
+  # with the period.
+  if [[ -n $u_end && $(date +%F) > $u_end ]]; then
+    u_rx=0 u_tx=0 u_ack=0
+  fi
+
+  if iface=$(meter_iface) && [[ -r /sys/class/net/$iface/statistics/rx_bytes ]]; then
+    cur_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes")
+    cur_tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes")
+    if ((have_state)); then
+      # A counter below the last snapshot means the netdev was re-created
+      # (reboot, replug, suspend): everything on it is new traffic.
+      ((cur_rx >= u_lrx)) && d_rx=$((cur_rx - u_lrx)) || d_rx=$cur_rx
+      ((cur_tx >= u_ltx)) && d_tx=$((cur_tx - u_ltx)) || d_tx=$cur_tx
+      u_rx=$((u_rx + d_rx))
+      u_tx=$((u_tx + d_tx))
+    fi
+    # First run only snapshots — the counters may hold traffic from before
+    # the meter existed, and charging that would overcount.
+    u_lrx=$cur_rx
+    u_ltx=$cur_tx
+  fi
+
+  printf 'period_start=%s\nperiod_end=%s\nrx=%s\ntx=%s\nlast_rx=%s\nlast_tx=%s\nack=%s\n' \
+    "$PERIOD_START" "$PERIOD_NEXT" "$u_rx" "$u_tx" "$u_lrx" "$u_ltx" "$u_ack" >"$USAGE_FILE"
+
+  USED_BYTES=$((u_rx + u_tx))
+  LIMIT_BYTES=$(limit_bytes)
+  LIMIT_ACK=$u_ack
+
+  if ((LIMIT_BYTES > 0 && USED_BYTES >= LIMIT_BYTES && LIMIT_ACK == 0)) &&
+    [[ ${STATE:-} == connected ]]; then
+    if nm_down; then
+      omarchy-notification-send -g "󰢿" -u critical "Data limit reached" \
+        "Used $(fmt_bytes "$USED_BYTES") of $(fmt_bytes "$LIMIT_BYTES") — cellular disconnected. Reconnect manually to keep using data this period." 2>/dev/null ||
+        notify "Data limit reached — cellular disconnected"
+      STATE=disabled
+    fi
+  fi
+}
+
+cmd_limit() {
+  case "${1:-}" in
+  "")
+    read_state
+    meter_update
+    period_bounds
+    if ((LIMIT_BYTES > 0)); then
+      echo "Data limit:  $(get_cfg DATA_LIMIT) ($(fmt_bytes "$LIMIT_BYTES"))"
+    else
+      echo "Data limit:  off"
+    fi
+    echo "Period:      $(get_cfg DATA_PERIOD | grep . || echo monthly), started $PERIOD_START, resets $PERIOD_NEXT"
+    echo "Used:        $(fmt_bytes "$USED_BYTES")"
+    if ((LIMIT_ACK)); then
+      echo "Note:        limit reached and overridden — no auto-cutoff until the period resets"
+    fi
+    ;;
+  off) set_cfg DATA_LIMIT off && echo "Data limit disabled." ;;
+  day)
+    [[ ${2:-} =~ ^[0-9]+$ ]] && ((10#$2 >= 1 && 10#$2 <= 31)) || {
+      echo "usage: omarchy-cellular limit day <1-31>" >&2
+      return 2
+    }
+    set_cfg DATA_RESET_DAY "$2" && echo "Package renews on day $2 of the month."
+    ;;
+  period)
+    [[ ${2:-} == monthly || ${2:-} == daily || ${2:-} == days ]] || {
+      echo "usage: omarchy-cellular limit period {monthly|daily|days}" >&2
+      return 2
+    }
+    set_cfg DATA_PERIOD "$2" && echo "Billing period set to $2."
+    ;;
+  days)
+    [[ ${2:-} =~ ^[0-9]+$ ]] && ((10#$2 >= 1 && 10#$2 <= 365)) || {
+      echo "usage: omarchy-cellular limit days <1-365> [start-date]" >&2
+      return 2
+    }
+    set_cfg DATA_PERIOD days
+    set_cfg DATA_DAYS "$2"
+    # Without an explicit date the bundle is taken to start today, which is what
+    # "I just topped up" means.
+    if [[ -n ${3:-} ]]; then
+      date -d "$3" +%F >/dev/null 2>&1 || {
+        echo "Not a date: $3" >&2
+        return 2
+      }
+      set_cfg DATA_START "$(date -d "$3" +%F)"
+    else
+      set_cfg DATA_START "$(date +%F)"
+    fi
+    period_bounds
+    echo "Period set to $2 days, started $PERIOD_START, resets $PERIOD_NEXT."
+    ;;
+  reset)
+    rm -f "$USAGE_FILE"
+    # On a fixed-length bundle, "reset" means a new bundle: the window has to
+    # start again too, or the counter zeroes while the old expiry date stands.
+    # Monthly and daily windows come from the calendar, so there is nothing to
+    # re-anchor.
+    if [[ $(get_cfg DATA_PERIOD) == days ]]; then
+      set_cfg DATA_START "$(date +%F)"
+      period_bounds
+      echo "Usage counter reset; period restarted, resets $PERIOD_NEXT."
+    else
+      echo "Usage counter reset."
+    fi
+    ;;
+  *)
+    if [[ $(limit_bytes_probe "${1:-}") -gt 0 ]]; then
+      set_cfg DATA_LIMIT "$1"
+      echo "Data limit set to $1."
+    else
+      cat >&2 <<'EOF'
+usage: omarchy-cellular limit [command]
+
+  (no args)             show limit, period and usage
+  <size>                set the limit, e.g. 5G, 1.5G, 500M
+  off                   disable the limit (usage is still tracked)
+  day <1-31>            day of the month the package renews
+  days <n> [start]      fixed-length period, e.g. a 30-day prepaid bundle
+  period monthly|daily|days
+                        billing period
+  reset                 zero the usage counter (e.g. after buying extra data)
+EOF
+      return 2
+    fi
+    ;;
+  esac
+}
+
+# Validate a size argument without touching the config.
+limit_bytes_probe() {
+  awk -v s="${1:-}" 'BEGIN {
+    n = s
+    sub(/[GgMmKk][Bb]?$/, "", n)
+    if (n !~ /^[0-9]+(\.[0-9]+)?$/ || n == s) { print 0; exit }
+    u = toupper(substr(s, length(n) + 1, 1))
+    m = 0
+    if (u == "G") m = 1024 ^ 3
+    else if (u == "M") m = 1024 ^ 2
+    else if (u == "K") m = 1024
+    printf "%.0f", n * m
+  }'
+}
+
+# Everything the shell panel needs in one process spawn: modem state, config
+# and unit status as key=value lines. Values are single-line by construction
+# (mmcli/config fields), so no quoting is needed.
+# --------------------------------------------------------------- device detail
+# Static identity and the radio-mode selector. Cheap enough to read on demand;
+# the panel asks for them once per refresh.
+
+# Sets IMEI, NUMBER, CARRIER_CFG, MODEL, FIRMWARE, MODES_ALLOWED, MODES_PREFERRED.
+read_details() {
+  IMEI="" ICCID="" EID="" SIM_TYPE="" SIM_OPERATOR="" NUMBER="" CARRIER_CFG="" MODEL="" FIRMWARE="" MODES_ALLOWED="" MODES_PREFERRED="" MODES_SUPPORTED=""
+  local idx dump modes
+  idx=$(modem_index) || return 0
+  [[ -n $idx ]] || return 0
+  dump=$(modem_dump "$idx") || return 0
+
+  IMEI=$(kv "$dump" modem.generic.equipment-identifier)
+  # The SIM's serial: what a carrier asks for to activate the line. Lives on the
+  # SIM object rather than the modem.
+  local simpath
+  simpath=$(kv "$dump" modem.generic.sim | sed 's|.*/SIM/||')
+  if [[ -n $simpath ]]; then
+    # ICCID/EID never change for a given SIM object, and `mmcli -i` segfaults
+    # on some of them (an eUICC after a profile switch, here), which on a 10s
+    # poll means a coredump notification every 10 seconds. Read each SIM path
+    # once and remember the answer, including an empty one, so a crashing path
+    # is not retried.
+    # Read the SIM through D-Bus rather than mmcli. This is the one object
+    # mmcli has ever crashed on: it dereferences the parent modem without a
+    # NULL check, so a read landing while the object is being set up or torn
+    # down segfaults. busctl asks the same service for the same properties and
+    # simply returns an error when it cannot. Everything else here stays on
+    # mmcli, whose -K output is easier to work with.
+    local sim_dbus="/org/freedesktop/ModemManager1/SIM/$simpath"
+    simprop() {
+      busctl get-property org.freedesktop.ModemManager1 "$sim_dbus" \
+        org.freedesktop.ModemManager1.Sim "$1" 2>/dev/null |
+        sed -n 's/^[a-z] "\(.*\)"$/\1/p; s/^u \([0-9]*\)$/\1/p'
+    }
+
+    ICCID=$(simprop SimIdentifier)
+    EID=$(simprop Eid)
+    # The name on the card itself, which on an eSIM is the active profile's
+    # provider. Distinct from the network operator: an Airalo profile roaming
+    # on Verizon reports Airalo here and Verizon Wireless there.
+    SIM_OPERATOR=$(simprop OperatorName)
+    case "$(simprop SimType)" in
+    1) SIM_TYPE=physical ;;
+    2) SIM_TYPE=esim ;;
+    *) SIM_TYPE="" ;;
+    esac
+
+  fi
+  NUMBER=$(kv "$dump" 'modem.generic.own-numbers.value[1]')
+  CARRIER_CFG=$(kv "$dump" modem.generic.carrier-configuration)
+  MODEL=$(kv "$dump" modem.generic.model)
+  FIRMWARE=$(kv "$dump" modem.generic.revision)
+
+  # "allowed: 3g, 4g, 5g; preferred: 5g"
+  modes=$(kv "$dump" modem.generic.current-modes)
+  MODES_ALLOWED=$(sed -n 's/^allowed: \([^;]*\).*/\1/p' <<<"$modes" | tr -d ' ')
+  MODES_PREFERRED=$(sed -n 's/.*preferred: *\(.*\)$/\1/p' <<<"$modes")
+  [[ $MODES_PREFERRED == none ]] && MODES_PREFERRED=""
+
+  # Which generations this modem has at all. A 5G part may have no 2g radio and
+  # an older one no 5g, so the panel builds its chips from this rather than
+  # assuming a set.
+  MODES_SUPPORTED=$(sed -n 's/^modem\.generic\.supported-modes\.value\[[0-9]*\][[:space:]]*:[[:space:]]*allowed: \([^;]*\);.*/\1/p' <<<"$dump" |
+    tr -d ' ' | tr ',' '\n' | sort -u | paste -sd, -)
+}
+
+# `mode` with no argument prints the current allowed set; with arguments it sets
+# them. "auto" means every mode the modem supports, preferring the fastest.
+# Send a raw AT command. ModemManager refuses --command outside debug mode and
+# the port is root-only, so this goes through pkexec like the control-port
+# recovery does. Diagnostics only: MM owns the modem, and issuing state-changing
+# commands behind its back will confuse it.
+cmd_at() {
+  local idx dump port
+  [[ -n ${1:-} ]] || {
+    echo "usage: omarchy-cellular at '<command>'    e.g. omarchy-cellular at 'AT+CSQ'" >&2
+    return 2
+  }
+  idx=$(modem_index_wait)
+  [[ -n $idx ]] || {
+    echo "No modem detected." >&2
+    return 1
+  }
+  port=$(at_port) || {
+    echo "This modem exposes no AT port." >&2
+    return 1
+  }
+  # `timeout cat` always exits non-zero: the port never closes, so it is the
+  # timeout that ends the read. Succeed on having an answer instead.
+  # Leading/trailing whitespace makes the modem reject the line outright.
+  local want="${1#"${1%%[![:space:]]*}"}"
+  want="${want%"${want##*[![:space:]]}"}"
+
+  local out
+  out=$(pkexec sh -c "exec 3<>$port; printf '%s\r' \"\$1\" >&3; timeout 3 cat <&3" sh "$want")
+  [[ -n $out ]] || {
+    echo "No answer from the modem. It may not support that command," >&2
+    echo "or ModemManager had the port busy. Try again, or check syntax." >&2
+    return 1
+  }
+  printf '%s\n' "$out"
+}
+
+# The APNs the carrier provisioned into the modem, which is a better list than
+# the database: it is what this SIM is actually set up for, and it includes ones
+# the database has never heard of. Contexts the modem uses for signalling rather
+# than data (IMS, emergency) are labelled rather than hidden, so nobody picks one
+# by mistake and wonders why nothing works.
+cmd_apn_list() {
+  local out
+  out=$(cmd_at 'AT+CGDCONT?' 2>/dev/null)
+  [[ -n $out ]] || {
+    echo "Could not read the modem's APN list." >&2
+    return 1
+  }
+  local cur
+  cur=$(get_cfg APN)
+
+  printf '%s\n' "$out" | sed -n 's/^+CGDCONT: \([0-9]*\),"\([^"]*\)","\([^"]*\)".*/\1\t\2\t\3/p' |
+    while IFS=$'\t' read -r ctx iptype apn; do
+      [[ -n $apn ]] || continue
+      local note=""
+      case "$apn" in
+      ims) note="  (VoLTE signalling — not for data)" ;;
+      sos) note="  (emergency calls — not for data)" ;;
+      esac
+      [[ $ctx == 1 ]] && note="${note:-  (default)}"
+      printf '  %s%-24s %-8s%s\n' "$([[ $apn == "$cur" ]] && echo '* ' || echo '  ')" "$apn" "$iptype" "$note"
+    done
+  echo
+  echo "* = currently configured.  Set one with: omarchy-cellular apn <name>"
+}
+
+# Refill the identifiers ModemManager cannot read. `mmcli -i` segfaults on some
+# SIM objects, and the eUICC here is one, so ICCID comes from the modem over AT
+# instead. Both values are immutable, so this is a one-off per SIM rather than
+# anything the panel should be doing on a poll -- hence a command you run, not
+# a background fetch that would prompt for pkexec every ten seconds.
+cmd_identify() {
+  local idx dump simpath out iccid
+  idx=$(modem_index_wait)
+  [[ -n $idx ]] || {
+    echo "No modem detected." >&2
+    return 1
+  }
+  dump=$(modem_dump "$idx")
+  simpath=$(kv "$dump" modem.generic.sim | sed 's|.*/SIM/||')
+  [[ -n $simpath ]] || {
+    echo "No SIM is active." >&2
+    return 1
+  }
+
+  mkdir -p "$STATE_DIR"
+  out=$(cmd_at 'AT+QCCID' 2>/dev/null)
+  iccid=$(sed -n 's/^+QCCID:[[:space:]]*\([0-9]\+\).*/\1/p' <<<"$out" | head -1)
+  if [[ -n $iccid ]]; then
+    printf '%s' "$iccid" >"$STATE_DIR/iccid"
+    echo "ICCID: $iccid"
+  else
+    echo "The modem did not report an ICCID." >&2
+  fi
+
+  # The EID is the eUICC's own identity and ModemManager usually reports it,
+  # but not when reading the SIM object crashes. lpac can, so use it when it
+  # happens to be installed -- optional, never a dependency, and it has to stop
+  # ModemManager to get the port to itself.
+  if [[ ! -s $STATE_DIR/eid ]] && command -v lpac >/dev/null; then
+    local port eid
+    port=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (at)$|\1|p' <<<"$dump" | head -1)
+    if [[ -n $port ]]; then
+      echo "Reading the EID with lpac (ModemManager pauses briefly)…"
+      eid=$(pkexec sh -c "systemctl stop ModemManager
+        LPAC_APDU=at LPAC_APDU_AT_DEVICE=/dev/$port lpac chip info 2>/dev/null
+        systemctl start ModemManager" |
+        sed -n 's/.*"eidValue":"\([0-9]\+\)".*/\1/p' | head -1)
+      [[ -n $eid ]] && printf '%s' "$eid" >"$STATE_DIR/eid"
+    fi
+  fi
+
+  if [[ -s $STATE_DIR/eid ]]; then
+    echo "EID:   $(cat "$STATE_DIR/eid")"
+  elif ! command -v lpac >/dev/null; then
+    echo "EID:   unavailable (ModemManager cannot read it; install lpac to fetch it)" >&2
+  fi
+  return 0
+}
+
+cmd_mode() {
+  local idx want
+  idx=$(modem_index_wait)
+  [[ -n $idx ]] || {
+    echo "No modem found." >&2
+    return 1
+  }
+
+  want="${1:-}"
+  if [[ -z $want ]]; then
+    read_details
+    printf '%s\n' "${MODES_ALLOWED:-unknown}"
+    return 0
+  fi
+
+  read_details
+  local supported=$MODES_SUPPORTED
+  [[ -n $supported ]] || supported=3g,4g,5g
+
+  local allowed preferred
+  case "$want" in
+  auto | all)
+    allowed=${supported//,/|}
+    # Prefer the fastest the modem actually has.
+    for preferred in 5g 4g 3g 2g; do
+      [[ ,$supported, == *,$preferred,* ]] && break
+    done
+    ;;
+  2g | 3g | 4g | 5g)
+    [[ ,$supported, == *,$want,* ]] || {
+      echo "This modem does not support $want." >&2
+      return 1
+    }
+    allowed=$want preferred=none
+    ;;
+  *)
+    echo "usage: omarchy-cellular mode [auto|${supported//,/|}]" >&2
+    return 2
+    ;;
+  esac
+
+  local -a args=(--set-allowed-modes="$allowed")
+  [[ $preferred != none ]] && args+=(--set-preferred-mode="$preferred")
+  if mmcli -m "$idx" "${args[@]}" >/dev/null 2>&1; then
+    echo "Radio mode set to $want."
+    notify "Radio mode: $want"
+  else
+    echo "Could not set the radio mode (the modem may not support that combination)." >&2
+    return 1
+  fi
+}
+
+# Detailed signal, as opposed to the 0-100 quality percentage the bars use.
+# mmcli groups these under a per-access-technology heading (LTE, 5G, UMTS...)
+# with a different field set for each, so parse generically: take whatever
+# "name: value" rows appear and let the panel show the ones it knows. Requires
+# --signal-setup to have armed polling, and a serving cell to measure.
+read_signal() {
+  SIG_TECH="" SIG_RSSI="" SIG_RSRP="" SIG_RSRQ="" SIG_SNR="" SIG_ECIO=""
+  # Only meaningful with a serving cell, and every mmcli call against a modem
+  # that is re-enumerating races its teardown -- mmcli segfaults on
+  # MM_IS_MODEM when the object goes away mid-query. Skip entirely unless
+  # connected.
+  [[ ${STATE:-} == connected ]] || return 0
+
+  local idx out line tech name value
+  idx=$(modem_index) || return 0
+  [[ -n $idx ]] || return 0
+
+  # --signal-setup writes config; arm it once rather than on every refresh.
+  if [[ ! -f $STATE_DIR/signal-armed ]]; then
+    mmcli -m "$idx" --signal-setup="${OMARCHY_CELLULAR_SIGNAL_RATE:-5}" >/dev/null 2>&1 &&
+      : >"$STATE_DIR/signal-armed"
+  fi
+  out=$(mmcli -m "$idx" --signal-get 2>/dev/null) || return 0
+
+  # mmcli emits one block per access technology, and a modem that scanned 5G
+  # keeps reporting an empty 5G block alongside the live LTE one. Taking the
+  # last block wins the wrong argument: prefer the block matching the tech the
+  # modem says it is actually using, and otherwise the first block that carried
+  # any value at all.
+  local want="${TECH:-}" cur="" got_wanted=0
+  while IFS= read -r line; do
+    [[ $line == *"|"* ]] || continue
+
+    tech=$(sed 's/|.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$line")
+    [[ -n $tech ]] && cur=$tech
+    [[ $cur == "Signal" ]] && continue
+
+    name=$(sed 's/.*|[[:space:]]*//; s/:.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' <<<"$line")
+    value=$(sed 's/.*:[[:space:]]*//; s/[[:space:]]*$//' <<<"$line")
+    [[ $value == *dBm* || $value == *dB* ]] || continue
+
+    # Once the wanted tech has produced a value, ignore every other block.
+    if [[ -n $want && ${cur^^} != "${want^^}" ]]; then
+      ((got_wanted)) && continue
+    elif [[ -n $want ]]; then
+      got_wanted=1
+      [[ $SIG_TECH != "$cur" ]] && SIG_RSSI="" SIG_RSRP="" SIG_RSRQ="" SIG_SNR="" SIG_ECIO=""
+    fi
+    SIG_TECH=$cur
+
+    case "$name" in
+    rssi) SIG_RSSI=$value ;;
+    rsrp) SIG_RSRP=$value ;;
+    rsrq) SIG_RSRQ=$value ;;
+    snr | sinr) SIG_SNR=$value ;;
+    ecio) SIG_ECIO=$value ;;
+    esac
+  done <<<"$out"
+
+  # mmcli reports nothing between samples, so a naive read blanks every field
+  # and repopulates a second later -- the panel visibly flickers. Remember the
+  # last value each field had and reuse it while it is still plausibly current.
+  local f v now stamp
+  now=${EPOCHSECONDS:-0}
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  for f in TECH RSSI RSRP RSRQ SNR ECIO; do
+    local var="SIG_$f" cache="$STATE_DIR/sig.$f"
+    if [[ -n ${!var} ]]; then
+      printf '%s\t%s' "$now" "${!var}" >"$cache"
+      continue
+    fi
+    [[ -s $cache ]] || continue
+    IFS=$'\t' read -r stamp v <"$cache"
+    # Older than the hold window is stale, not missing; let it go blank.
+    (( now - stamp <= ${OMARCHY_CELLULAR_SIGNAL_HOLD:-30} )) && printf -v "$var" '%s' "$v"
+  done
+}
+
+cmd_panel() {
+  read_state
+  meter_update
+  printf 'state=%s\n' "$STATE"
+  printf 'operator=%s\n' "$OPERATOR"
+  printf 'tech=%s\n' "$TECH"
+  printf 'signal=%s\n' "$SIGNAL"
+  printf 'iface=%s\n' "$IFACE"
+  printf 'ip=%s\n' "$IPADDR"
+  printf 'icon=%s\n' "$(signal_icon)"
+  printf 'active_slot=%s\n' "$ACTIVE_SLOT"
+  printf 'slot1_sim=%s\n' "$SLOT1_SIM"
+  printf 'slot2_sim=%s\n' "$SLOT2_SIM"
+  printf 'slot=%s\n' "$(get_cfg SIM_SLOT)"
+  printf 'apn=%s\n' "$(get_cfg APN)"
+  printf 'metered=%s\n' "$(get_cfg METERED | grep . || echo yes)"
+  printf 'prefer_cellular=%s\n' "$([[ $(get_cfg PREFER_CELLULAR) == yes ]] && echo yes || echo no)"
+  printf 'route_via=%s\n' "$(route_via)"
+
+  # Roaming is the one state Wi-Fi has no analogue for, and it costs money.
+  read_details
+  printf 'reason=%s\n' "$(failure_reason)"
+  printf 'roaming=%s\n' "$([[ $REG_STATE == roaming ]] && echo yes || echo no)"
+  printf 'imei=%s\n' "$IMEI"
+  printf 'iccid=%s\n' "$ICCID"
+  printf 'eid=%s\n' "$EID"
+  printf 'sim_type=%s\n' "$SIM_TYPE"
+  printf 'sim_operator=%s\n' "$SIM_OPERATOR"
+  printf 'number=%s\n' "$NUMBER"
+  printf 'carrier_config=%s\n' "$CARRIER_CFG"
+  printf 'model=%s\n' "$MODEL"
+  printf 'firmware=%s\n' "$FIRMWARE"
+  printf 'modes_allowed=%s\n' "$MODES_ALLOWED"
+  printf 'modes_preferred=%s\n' "$MODES_PREFERRED"
+  printf 'modes_supported=%s\n' "$MODES_SUPPORTED"
+
+  read_signal
+  printf 'sig_tech=%s\n' "$SIG_TECH"
+  printf 'sig_rssi=%s\n' "$SIG_RSSI"
+  printf 'sig_rsrp=%s\n' "$SIG_RSRP"
+  printf 'sig_rsrq=%s\n' "$SIG_RSRQ"
+  printf 'sig_snr=%s\n' "$SIG_SNR"
+  printf 'sig_ecio=%s\n' "$SIG_ECIO"
+  if nm_autoconnect_get; then
+    printf 'autoconnect=yes\n'
+  else
+    printf 'autoconnect=no\n'
+  fi
+  if nm_running; then
+    printf 'installed=yes\n'
+  else
+    printf 'installed=no\n'
+  fi
+  if wwan_hw_present; then
+    printf 'hw=yes\n'
+  else
+    printf 'hw=no\n'
+  fi
+
+  printf 'used_bytes=%s\n' "$USED_BYTES"
+  printf 'limit_bytes=%s\n' "$LIMIT_BYTES"
+  printf 'limit=%s\n' "$(get_cfg DATA_LIMIT)"
+  printf 'period=%s\n' "$(get_cfg DATA_PERIOD | grep . || echo monthly)"
+  printf 'next_reset=%s\n' "$PERIOD_NEXT"
+  printf 'period_start=%s\n' "$PERIOD_START"
+  printf 'reset_day=%s\n' "$(get_cfg DATA_RESET_DAY | grep . || echo 1)"
+  printf 'period_days=%s\n' "$(get_cfg DATA_DAYS | grep . || echo 30)"
+  printf 'limit_ack=%s\n' "$LIMIT_ACK"
+
+  # Traffic and latency cost real time (the ping alone can burn its full 1s
+  # timeout), so they are opt-in: the open panel polls --verbose, the bar's
+  # background poll stays on the cheap form.
+  if [[ ${1:-} == --verbose && -n $IFACE ]]; then
+    [[ -r /sys/class/net/$IFACE/statistics/rx_bytes ]] &&
+      printf 'rx_bytes=%s\n' "$(cat "/sys/class/net/$IFACE/statistics/rx_bytes")"
+    [[ -r /sys/class/net/$IFACE/statistics/tx_bytes ]] &&
+      printf 'tx_bytes=%s\n' "$(cat "/sys/class/net/$IFACE/statistics/tx_bytes")"
+    # Bind to the modem's interface: the default route is usually Wi-Fi, and
+    # an unbound ping would measure the wrong link entirely. An empty value is
+    # a timeout — the panel counts those as packet loss.
+    if [[ $STATE == connected ]] && command -v ping >/dev/null; then
+      printf 'ping_ms=%s\n' "$(LC_ALL=C ping -n -c 1 -W 1 -I "$IFACE" 1.1.1.1 2>/dev/null |
+        awk -F'time[=<]' '/time[=<]/ { split($2, parts, " "); print parts[1]; exit }')"
+    fi
+  fi
+}
+
+# NetworkManager owns the connection; without it running nothing can connect.
+require_system_half() {
+  nm_running && return 0
+  echo "NetworkManager is not running; it owns the cellular connection." >&2
+  notify "NetworkManager is not running"
+  return 1
+}
+
+# Why the network or the modem said no. The rejection cause is the useful one:
+# an unprovisioned SIM reports gprs-not-allowed, which otherwise just looks like
+# "searching" forever. Returns "" when there is nothing to say.
+failure_reason() {
+  local idx dump rej failed
+  idx=$(modem_index) || return 0
+  [[ -n $idx ]] || return 0
+  dump=$(modem_dump "$idx") || return 0
+
+  rej=$(kv "$dump" modem.3gpp.network-rejection-error)
+  failed=$(kv "$dump" modem.generic.state-failed-reason)
+  [[ $rej == "--" ]] && rej=""
+  [[ $failed == "--" ]] && failed=""
+
+  case "$rej" in
+  # Kept short: this lands in the panel's hero line, which elides.
+  gprs-not-allowed) printf 'SIM not provisioned for data' ;;
+  plmn-not-allowed) printf 'carrier not allowed for this SIM' ;;
+  roaming-not-allowed) printf 'roaming not allowed' ;;
+  illegal-me | illegal-ms) printf 'device rejected by network' ;;
+  "")
+    case "$failed" in
+    esim-without-profiles) printf 'eSIM has no profile installed' ;;
+    sim-missing) printf 'no SIM in the active slot' ;;
+    sim-error) printf 'the SIM could not be read' ;;
+    "") ;;
+    *) printf 'modem failed: %s' "$failed" ;;
+    esac
+    ;;
+  *) printf 'rejected: %s' "$rej" ;;
+  esac
+}
+
+cmd_connect() {
+  require_system_half || return 1
+  # Connecting while over the limit is a deliberate act: honor it, and stop
+  # the meter from cutting the connection right back off. The override lasts
+  # until the period resets.
+  read_state
+  meter_update
+  if ((LIMIT_BYTES > 0 && USED_BYTES >= LIMIT_BYTES && LIMIT_ACK == 0)); then
+    sed -i 's/^ack=.*/ack=1/' "$USAGE_FILE"
+    notify "Over the data limit ($(fmt_bytes "$USED_BYTES") used) — auto-cutoff disabled until the period resets"
+  fi
+  notify "Connecting…"
+  if nm_up; then
+    read_state
+    notify "Connected to ${OPERATOR:-cellular network}"
+  else
+    local why
+    why=$(failure_reason)
+    notify "Connection failed${why:+ — $why}"
+    return 1
+  fi
+}
+
+cmd_disconnect() {
+  nm_down && notify "Disconnected"
+}
+
+cmd_toggle() {
+  read_state
+  if [[ $STATE == connected ]]; then cmd_disconnect; else cmd_connect; fi
+}
+
+# eSIM provisioning needs a Local Profile Assistant. There is no system-provided
+# one and the plugin system has no way to declare a dependency, so check at the
+# point of use and say what is missing rather than failing obscurely.
+LPA_HINT="Install one with:  yay -S lpac
+It is an AUR package, so it builds from source on your machine."
+
+have_lpa() { command -v lpac >/dev/null; }
+
+# Every lpac result is read through jq. Without it the parse fails and the
+# command reports "could not enable profile", which blames the eSIM for a
+# missing parser. Say what is actually wrong.
+need_jq() {
+  command -v jq >/dev/null || {
+    echo "Reading eSIM profiles needs jq, which is not installed." >&2
+    echo "Install with:  omarchy pkg add jq" >&2
+    return 1
+  }
+}
+
+# The AT device node, for lpac and raw AT. Not taken from ModemManager's port
+# list: that reflects what MM has claimed and it drops the AT port when it is
+# driving the modem over MBIM, while the kernel node is there regardless. USB
+# modems expose ttyUSB* instead of wwan*at*.
+at_port() {
+  # The kernel labels wwan ports by function, so ask rather than guess at
+  # names: MHI parts expose wwan0at0, others number differently.
+  local d n
+  for d in /sys/class/wwan/*/; do
+    [[ -r $d/type ]] || continue
+    [[ $(cat "$d/type" 2>/dev/null) == AT ]] || continue
+    n=$(basename "$d")
+    [[ -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  done
+
+  # Older USB modems predate the wwan subsystem and expose tty nodes instead.
+  # Which ttyUSB carries AT varies per device and ttyACM is used by all sorts of
+  # things, so take ModemManager's word for it rather than opening a guess.
+  local idx
+  idx=$(modem_index) || return 1
+  [[ -n $idx ]] || return 1
+  n=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (at)$|\1|p' <<<"$(modem_dump "$idx")" | head -1)
+  [[ -n $n && -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  return 1
+}
+
+
+# ------------------------------------------------------------- eSIM profiles
+# An eUICC stores several profiles and enables one at a time. lpac speaks
+# SGP.22 to it over the AT port, which ModemManager holds, so every operation
+# is stop-MM / act / start-MM under a single pkexec -- and drops the connection
+# for its duration. Nothing here runs unless the user asked for it.
+
+# Runs one lpac command with the port to itself. Prints lpac's JSON on stdout.
+lpac_run() {
+  local port
+  port=$(at_port) || {
+    echo "This modem exposes no AT port, which lpac needs." >&2
+    return 1
+  }
+
+  # lpac needs the AT port, so ModemManager is stopped for the read and
+  # NetworkManager tears the connection down with it. Note whether it was up.
+  local was_active=""
+  nm_is_active && was_active=1
+
+  # Serialize: two of these overlapping means one stops ModemManager while the
+  # other is starting it, and lpac gets a port that is about to be reclaimed.
+  # flock also makes the panel's repeated Refresh clicks safe.
+  exec {lock}>"$STATE_DIR/lpac.lock" 2>/dev/null || true
+  flock -w 90 "$lock" 2>/dev/null || true
+
+  # Wait for the port to be genuinely free rather than assuming `systemctl
+  # stop` means ModemManager has let go of it, then hand it back and let MM
+  # settle before returning -- the caller's next command needs a modem.
+  local out
+  out=$(pkexec sh -c '
+    port=$1
+    systemctl stop ModemManager
+    for _ in $(seq 1 40); do
+      exec 9<>"$port" 2>/dev/null && { exec 9>&-; break; }
+      sleep 0.25
+    done
+    # euicc_init opens a logical channel to the ISD-R applet and fails
+    # intermittently just after ModemManager releases the port -- three times in
+    # four when measured, always within about three seconds. Retry inside the
+    # one authorization rather than surfacing a coin flip; a genuine failure
+    # fails the same way every attempt.
+    for attempt in 1 2 3 4; do
+      result=$(LPAC_APDU=at LPAC_APDU_AT_DEVICE=$port lpac ${@:2})
+      case $result in
+      *euicc_init*) sleep 1 ;;
+      *) break ;;
+      esac
+    done
+    printf "%s" "$result"
+    systemctl start ModemManager
+  ' sh "$port" "$@")
+
+  flock -u "$lock" 2>/dev/null || true
+  exec {lock}>&- 2>/dev/null || true
+
+  # Autoconnect usually brings the connection back once ModemManager returns;
+  # with autoconnect off nothing does, and the read silently costs you the
+  # link. Restore it in the background -- nm_up waits up to 45s, and the
+  # caller (the panel) wants its profile list now. Redirected so the
+  # background job does not hold the caller's stdout open.
+  (
+    for _ in $(seq 1 20); do
+      [[ -n $(nm_device) ]] && break
+      sleep 0.5
+    done
+    # Seizing the AT port repeatedly can leave the radio dead even though the
+    # modem enumerates fine, and a wedged modem is no use to anyone -- reset it
+    # without asking. Runs whether or not the connection was up, because the
+    # damage is to the modem, not the connection.
+    cache_flush
+    idx=$(modem_index_wait 30) && ensure_radio "$idx" >/dev/null
+    [[ -n $was_active ]] && { nm_is_active || nm_up; }
+    # The parent's EXIT trap has already taken the cache dir by now; this
+    # subshell recreated it behind the trap, so clear up after itself.
+    rm -rf "$CACHE_DIR"
+  ) >/dev/null 2>&1 &
+
+
+
+  [[ -n $out ]] || {
+    echo "lpac produced no output (exit path above)." >&2
+    return 1
+  }
+  printf '%s\n' "$out"
+}
+
+# Guard shared by every profile command.
+profile_precheck() {
+  need_jq || return 1
+  have_lpa || {
+    echo "eSIM profiles need a Local Profile Assistant, which is not installed." >&2
+    echo "$LPA_HINT" >&2
+    return 1
+  }
+
+  # Every lpac run restarts ModemManager on its way out, and the modem takes
+  # twenty seconds or more to re-enumerate afterwards. Without waiting for that,
+  # the run after any other run finds no modem and refuses -- which looks like
+  # a failure to authenticate but is the previous command's cleanup.
+  local i
+  for ((i = 0; i < 60; i++)); do
+    systemctl is-active --quiet ModemManager && break
+    sleep 0.5
+  done
+
+  local idx slot
+  idx=$(modem_index_wait 45) || {
+    echo "The modem has not come back yet after the last eSIM operation." >&2
+    echo "Give it a few seconds and try again." >&2
+    return 1
+  }
+  slot=$(kv "$(modem_dump "$idx")" modem.generic.primary-sim-slot)
+  [[ $slot == 2 ]] || {
+    echo "Profiles live on the eUICC, which is not the active slot." >&2
+    echo "Switch to it first:  omarchy-cellular sim 2 --force" >&2
+    return 1
+  }
+}
+
+# key=value lines the panel can read, one profile per line prefixed profile.N.
+cmd_profile_list() {
+  # No precheck. lpac drives the AT port directly and needs neither
+  # ModemManager nor a modem object, so waiting for the modem to re-enumerate
+  # after the previous run only delayed the authorization prompt by seconds
+  # for no gain. A wrong slot fails fast in lpac and says so.
+  need_jq || return 1
+  have_lpa || {
+    echo "eSIM profiles need a Local Profile Assistant, which is not installed." >&2
+    echo "$LPA_HINT" >&2
+    return 1
+  }
+  local json
+  json=$(lpac_run profile list) || return 1
+
+  jq -r '
+    (.payload.data // [])
+    | to_entries[]
+    | "profile.\(.key).iccid=\(.value.iccid)\n"
+    + "profile.\(.key).name=\(.value.profileNickname // .value.profileName // "Unnamed")\n"
+    + "profile.\(.key).provider=\(.value.serviceProviderName // "")\n"
+    + "profile.\(.key).state=\(.value.profileState)\n"
+    + "profile.\(.key).class=\(.value.profileClass)"
+  ' <<<"$json" 2>/dev/null
+}
+
+# Carriers hand out a QR code, not the string inside it. Select the region it
+# is displayed in and decode locally -- no camera, no upload, and it works from
+# a browser tab or a PDF. zbar and grim/slurp are in extra and already present
+# on Omarchy, so this needs nothing new.
+cmd_scan() {
+  command -v zbarimg >/dev/null && command -v grim >/dev/null && command -v slurp >/dev/null || {
+    echo "Scanning needs zbar and grim/slurp." >&2
+    echo "Install with:  omarchy pkg add zbar grim slurp" >&2
+    return 1
+  }
+
+  local shot region code
+  shot=$(mktemp --suffix=.png)
+  trap 'rm -f "$shot"' RETURN
+
+  region=$(slurp -d 2>/dev/null) || {
+    echo "Cancelled." >&2
+    return 1
+  }
+  grim -g "$region" "$shot" 2>/dev/null || {
+    echo "Could not capture that region." >&2
+    return 1
+  }
+
+  code=$(zbarimg --quiet --raw "$shot" 2>/dev/null | head -1)
+  [[ -n $code ]] || {
+    echo "No QR code found in that region." >&2
+    notify "No QR code found there"
+    return 1
+  }
+
+  # An eSIM QR contains an LPA activation code. Anything else is not one.
+  [[ $code == LPA:* ]] || {
+    echo "That QR code is not an eSIM activation code:" >&2
+    echo "  $code" >&2
+    return 1
+  }
+
+  printf '%s\n' "$code"
+}
+
+cmd_profile() {
+  local action="${1:-list}" arg="${2:-}" arg2="${3:-}"
+  case "$action" in
+  list) cmd_profile_list ;;
+  enable | disable | delete)
+    [[ -n $arg ]] || {
+      echo "usage: omarchy-cellular profile $action <iccid>" >&2
+      return 2
+    }
+    profile_precheck || return 1
+    if lpac_run profile "$action" "$arg" | jq -e '.payload.code == 0' >/dev/null 2>&1; then
+      echo "Profile $arg ${action}d."
+      notify "eSIM profile ${action}d"
+      [[ $action == enable ]] && nm_apply
+    else
+      echo "Could not $action profile $arg." >&2
+      notify "eSIM profile $action failed"
+      return 1
+    fi
+    ;;
+  nickname)
+    [[ -n $arg && -n $arg2 ]] || {
+      echo "usage: omarchy-cellular profile nickname <iccid> <name>" >&2
+      return 2
+    }
+    profile_precheck || return 1
+    lpac_run profile nickname "$arg" "$arg2" | jq -e '.payload.code == 0' >/dev/null 2>&1 &&
+      echo "Renamed to $arg2." || { echo "Rename failed." >&2; return 1; }
+    ;;
+  scan)
+    # Scan and install in one step; the code is never shown or stored.
+    local scanned
+    scanned=$(cmd_scan) || return 1
+    cmd_profile download "$scanned"
+    ;;
+  download | add)
+    [[ -n $arg ]] || {
+      echo "usage: omarchy-cellular profile download <activation-code|LPA:1\$server\$code>" >&2
+      return 2
+    }
+    profile_precheck || return 1
+    echo "Downloading (this takes up to a minute and drops cellular)…"
+    if lpac_run profile download -a "$arg" | jq -e '.payload.code == 0' >/dev/null 2>&1; then
+      echo "Profile downloaded. Enable it with: omarchy-cellular profile enable <iccid>"
+      notify "eSIM profile downloaded"
+    else
+      echo "Download failed. Check the activation code has not already been used." >&2
+      notify "eSIM profile download failed"
+      return 1
+    fi
+    ;;
+  *)
+    echo "usage: omarchy-cellular profile [list|enable|disable|delete|nickname|download]" >&2
+    return 2
+    ;;
+  esac
+}
+
+cmd_sim() {
+  local slot="${1:-}" force=0
+  [[ ${2:-} == --force ]] && force=1
+  case $slot in
+  # Bare `sim` prints the configured slot — the menu's ✓ marks read this, so
+  # it must stay cheap (no mmcli round-trip).
+  "") get_cfg SIM_SLOT; return 0 ;;
+  1 | physical) slot=1 ;;
+  2 | esim) slot=2 ;;
+  *)
+    echo "usage: omarchy-cellular sim [1|2]   (1 = physical card, 2 = eSIM)" >&2
+    return 2
+    ;;
+  esac
+
+  # Refuse to switch onto a slot with no SIM in it. The modem cannot connect
+  # to anything there, and the attempt would hang the unit (and the panel's
+  # buttons with it) for minutes before failing.
+  local idx spath
+  # A slot switch is usually the second half of "switch away, switch back", so
+  # the modem is frequently still coming back when this runs.
+  idx=$(modem_index_wait 30)
+
+  # Already there: say so rather than tearing down a working connection to
+  # arrive where we are, then reporting the needless reconnect as a failure.
+  if [[ -n $idx ]] && [[ "$(kv "$(modem_dump "$idx")" modem.generic.primary-sim-slot)" == "$slot" ]]; then
+    set_cfg SIM_SLOT "$slot"
+    echo "Already on SIM slot $slot."
+    return 0
+  fi
+
+  if [[ -n $idx && $force == 0 ]]; then
+    spath=$(kv "$(modem_dump "$idx")" "modem.generic.sim-slots.value[$slot]")
+    if [[ $spath == / ]]; then
+      if [[ $slot == 2 ]]; then
+        echo "The eSIM (slot 2) has no profile installed, so it cannot carry data." >&2
+        if have_lpa; then
+          echo "Install one with lpac, then switch back." >&2
+          echo "An LPA has to talk to the eUICC while it is the active slot:" >&2
+          echo "    omarchy-cellular sim 2 --force" >&2
+          notify "eSIM has no profile installed. Not switching."
+        else
+          echo >&2
+          echo "That needs a Local Profile Assistant, which is not installed." >&2
+          echo "$LPA_HINT" >&2
+          notify "eSIM has no profile, and no LPA is installed to add one."
+        fi
+      else
+        echo "SIM slot $slot is empty — insert a card first. Not switching." >&2
+        notify "SIM slot $slot is empty — not switching"
+      fi
+      return 1
+    fi
+  fi
+
+  set_cfg SIM_SLOT "$slot"
+
+  # SetPrimarySimSlot is not on ModemManager's D-Bus whitelist, so it is
+  # root-only no matter what polkit says: the bus rejects the message before
+  # polkit is ever consulted. Everything else here runs as the user, so this
+  # is the only pkexec in the tool.
+  if [[ -n $idx ]]; then
+    echo "Switching to SIM slot $slot (this reconnects the modem)…"
+    if pkexec mmcli -m "$idx" --set-primary-sim-slot="$slot" >/dev/null 2>&1 &&
+      nm_apply && { ! nm_is_active || nm_up; }; then
+      read_state
+      notify "SIM slot $slot active — ${OPERATOR:-connected}"
+      cmd_status
+    else
+      # The slot may well have switched — the *connect* after it is what
+      # failed. An empty slot (blank eSIM) is the usual reason; say that
+      # instead of a generic failure, and notify for panel/menu clicks.
+      read_state
+      if [[ $STATE == nosim ]]; then
+        cmd_status
+        if [[ $ACTIVE_SLOT == 2 ]]; then
+          notify "eSIM is empty — no profile installed. Cellular stays off until you switch back or install one."
+        else
+          notify "SIM slot ${ACTIVE_SLOT:-$slot} is empty"
+        fi
+        return 1
+      fi
+      echo "Slot switch failed — see: omarchy-cellular log" >&2
+      notify "SIM slot switch failed — see: omarchy-cellular log"
+      return 1
+    fi
+  else
+    echo "Saved SIM_SLOT=$slot. Run 'omarchy-cellular apply' to switch."
+  fi
+}
+
+# Carrier settings come from the mobile-broadband-provider-info database — the
+# same one NetworkManager's cellular wizard uses.
+#
+# Resolved next to this script rather than through PATH: the documented install
+# is `omarchy plugin add`, which puts both scripts in the plugin directory and
+# neither on PATH. Looking it up by name worked only for anyone who had also
+# symlinked it.
+PROVIDERS="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/omarchy-cellular-providers"
+[[ -x $PROVIDERS ]] || PROVIDERS=omarchy-cellular-providers
+
+carrier_write() { # <apn> <label> <user> <password> <provider>
+  set_cfg APN "$1"
+  set_cfg APN_USER "$3"
+  set_cfg APN_PASS "$4"
+
+  echo "Carrier:  $5"
+  echo "APN:      $1${2:+  ($2)}"
+  [[ -n $3 ]] && echo "Username: $3"
+  # Callers that apply for you (the panel) set QUIET; do not tell them to.
+  [[ ${OMARCHY_CELLULAR_QUIET:-0} == 1 ]] && return 0
+  echo
+  echo "Run 'omarchy-cellular apply' to activate it."
+}
+
+carrier_auto() {
+  local idx dump code mcc mnc row cc country provider apn sim bearer_apn
+
+  idx=$(modem_index_wait)
+  [[ -n $idx ]] || {
+    echo "No modem detected." >&2
+    return 1
+  }
+  dump=$(modem_dump "$idx")
+
+  # 3gpp.operator-code only exists once registered, which is exactly what you do
+  # not have when the APN is wrong. The SIM carries the same code regardless.
+  code=$(kv "$dump" modem.3gpp.operator-code)
+  if [[ -z $code ]]; then
+    sim=$(kv "$dump" modem.generic.sim | sed 's|.*/SIM/||')
+    [[ -n $sim ]] && code=$(kv "$(mmcli -i "$sim" -K 2>/dev/null)" sim.properties.operator-code)
+  fi
+
+  # Resolve a human carrier name when we can; it is only ever a label.
+  provider="" country=""
+  if [[ -n $code ]]; then
+    row=$($PROVIDERS lookup "${code:0:3}" "${code:3}" 2>/dev/null) &&
+      IFS=$'\t' read -r cc country provider <<<"$row"
+  fi
+
+  # The carrier provisions an APN into the modem's own carrier configuration,
+  # keyed off the SIM. That is what the network actually expects, and unlike a
+  # database lookup it distinguishes between a carrier's several APNs.
+  bearer_apn=$(kv "$dump" modem.3gpp.eps.initial-bearer.settings.apn)
+  [[ $bearer_apn == "--" ]] && bearer_apn=""
+  # The initial bearer is not always the data one. An eSIM that provisions only
+  # signalling contexts reports IMS here (vzwims on Verizon), and using it as
+  # the data APN gets "service option not subscribed" from the network.
+  local signalling_only=0
+  # Exact or suffix only. A loose *ims* substring is the same mistake that
+  # dropped every AT&T APN: it would match anything containing those letters.
+  case "${bearer_apn,,}" in
+  ims | sos | emergency | *ims) bearer_apn="" signalling_only=1 ;;
+  esac
+  if [[ -n $bearer_apn ]]; then
+    echo "Using the APN the modem was provisioned with${provider:+ for $provider} ($bearer_apn)."
+    carrier_write "$bearer_apn" "$bearer_apn" "" "" "${provider:-$(kv "$dump" modem.generic.carrier-configuration)}"
+    return 0
+  fi
+
+  # A modem whose only bearer is a signalling context -- an eSIM whose profile
+  # negotiates its own APN -- should be left blank rather than guessed at. The
+  # database will happily supply the host network's APN, and setting any value
+  # gets the connection refused with "service option not subscribed".
+  # Nothing here elevates. Detect is a click, and a prompt that appears only
+  # sometimes trains people to accept ones they did not expect.
+  if ((signalling_only)); then
+    echo "The modem is provisioned with no data APN${provider:+ for $provider}."
+    echo "Leaving it blank so the network chooses, which is what an eSIM profile expects."
+    carrier_write "" "" "" "" "${provider:-the network}"
+    return 0
+  fi
+
+  # An empty bearer is not evidence either way, and the database would happily
+  # supply the host network's APN -- wrong for an MVNO, and wrong for an eSIM
+  # whose profile negotiates its own. Say so rather than guess: a wrong APN
+  # takes down a working connection, and this is recoverable in one command.
+  if [[ -z $bearer_apn ]]; then
+    echo "The modem does not report which APN it was provisioned with." >&2
+    echo "Not guessing: a wrong APN drops a working connection." >&2
+    echo >&2
+    echo "  omarchy-cellular apn list     what the modem is actually configured with" >&2
+    echo "  omarchy-cellular apn ''       let the network choose (usually right for eSIM)" >&2
+    echo "  omarchy-cellular carrier list pick from the database by hand" >&2
+    return 1
+  fi
+
+  [[ -n $code ]] || {
+    echo "No operator code on the modem or the SIM. Pick the carrier by hand:" >&2
+    echo "    omarchy-cellular carrier list" >&2
+    return 1
+  }
+
+  # An operator code is MCC (always 3 digits) followed by a 2- or 3-digit MNC.
+  mcc=${code:0:3}
+  mnc=${code:3}
+
+  row=$($PROVIDERS lookup "$mcc" "$mnc") || return 1
+  IFS=$'\t' read -r cc country provider <<<"$row"
+
+  apn=$($PROVIDERS apns "$cc" "$provider" | head -1)
+  [[ -n $apn ]] || {
+    echo "$provider ($country) has no data APN in the database." >&2
+    return 1
+  }
+
+  echo "Detected $provider in $country (MCC $mcc, MNC $mnc)."
+  IFS=$'\t' read -r value label user password <<<"$apn"
+  carrier_write "$value" "$label" "$user" "$password" "$provider"
+}
+
+# Apply the config and report via notifications — the menu-driven flows run
+# detached from any terminal, so stdout has nowhere to go.
+apply_gui() {
+  if ! nm_running; then
+    notify "Saved. NetworkManager is not running."
+    return 1
+  fi
+  notify "Applying carrier settings…"
+  if nm_apply && { ! nm_is_active || nm_up; }; then
+    read_state
+    notify "Connected to ${OPERATOR:-cellular network}"
+  else
+    notify "Reconnect failed — see: omarchy-cellular log"
+    return 1
+  fi
+}
+
+# Country → carrier → APN picker built on the Omarchy menu (quattro's
+# omarchy-menu-select). Replaces the walker-based wizard from Omarchy 3.
+carrier_choose() {
+  local rows country cc provider apn_rows row choice
+  rows=$("$PROVIDERS" countries) || return 1
+
+  local names=()
+  mapfile -t names < <(cut -f2 <<<"$rows")
+  country=$(omarchy-menu-select "Country" "${names[@]}" -- --width 400) || return 0
+  [[ -n $country ]] || return 0
+  cc=$(awk -F'\t' -v n="$country" '$2 == n { print $1; exit }' <<<"$rows")
+
+  local provs=()
+  mapfile -t provs < <("$PROVIDERS" providers "$cc")
+  ((${#provs[@]})) || return 1
+  provider=$(omarchy-menu-select "Carrier in $country" "${provs[@]}" -- --width 400) || return 0
+  [[ -n $provider ]] || return 0
+
+  apn_rows=$("$PROVIDERS" apns "$cc" "$provider")
+  if [[ -z $apn_rows ]]; then
+    notify "$provider has no data APN in the database"
+    return 1
+  fi
+
+  # Most carriers publish exactly one data APN — do not make the user confirm it.
+  if [[ $(wc -l <<<"$apn_rows") -eq 1 ]]; then
+    row=$apn_rows
+  else
+    local opts=()
+    mapfile -t opts < <(awk -F'\t' '{ print ($2 == "" ? $1 : $1 "  —  " $2) }' <<<"$apn_rows")
+    choice=$(omarchy-menu-select "APN for $provider" "${opts[@]}" -- --width 500) || return 0
+    [[ -n $choice ]] || return 0
+    row=$(awk -F'\t' -v v="${choice%%  —  *}" '$1 == v { print; exit }' <<<"$apn_rows")
+  fi
+
+  local value label user password
+  IFS=$'\t' read -r value label user password <<<"$row"
+  set_cfg APN "$value"
+  set_cfg APN_USER "$user"
+  set_cfg APN_PASS "$password"
+  notify "Carrier set: $provider — APN $value"
+  apply_gui
+}
+
+cmd_apn_input() {
+  local apn
+  # Only a non-zero exit means cancelled. An empty submission is a real choice:
+  # some profiles -- eSIMs in particular -- negotiate the APN themselves and
+  # setting any value gets the connection refused.
+  apn=$(omarchy-menu-input "APN") || return 0
+  set_cfg APN "$apn"
+  if [[ -n $apn ]]; then
+    notify "APN set to $apn"
+  else
+    notify "APN cleared — the network will choose"
+  fi
+  apply_gui
+}
+
+cmd_notify_status() {
+  local body
+  body=$(cmd_status 2>&1)
+  omarchy-notification-send -g "󰢾" "Cellular" "$body" 2>/dev/null ||
+    notify "$body"
+}
+
+cmd_carrier() {
+  case "${1:-}" in
+  auto | detect) carrier_auto ;;
+  choose) carrier_choose ;;
+  list)
+    if [[ -z ${2:-} ]]; then
+      $PROVIDERS countries
+    elif [[ -z ${3:-} ]]; then
+      $PROVIDERS providers "$2"
+    else
+      $PROVIDERS apns "$2" "$3"
+    fi
+    ;;
+  set)
+    [[ -n ${2:-} && -n ${3:-} ]] || {
+      echo "usage: omarchy-cellular carrier set <country-code> <provider> [apn]" >&2
+      return 2
+    }
+    local rows row
+    rows=$($PROVIDERS apns "$2" "$3") || return 1
+    if [[ -n ${4:-} ]]; then
+      row=$(awk -F'\t' -v want="$4" '$1 == want { print; exit }' <<<"$rows")
+      [[ -n $row ]] || {
+        echo "$3 has no APN '$4'. Available:" >&2
+        cut -f1 <<<"$rows" >&2
+        return 1
+      }
+    else
+      row=$(head -1 <<<"$rows")
+    fi
+    local value label user password
+    IFS=$'\t' read -r value label user password <<<"$row"
+    carrier_write "$value" "$label" "$user" "$password" "$3"
+    ;;
+  *)
+    cat >&2 <<'EOF'
+usage: omarchy-cellular carrier <command>
+
+  auto                          detect the carrier from the SIM and set its APN
+  choose                        pick country/carrier/APN via the Omarchy menu
+  list                          list countries
+  list <cc>                     list carriers in that country
+  list <cc> <provider>          list that carrier's data APNs
+  set <cc> <provider> [apn]     apply a carrier's APN settings
+
+Examples:
+  omarchy-cellular carrier auto
+  omarchy-cellular carrier list pl
+  omarchy-cellular carrier set pl Orange
+EOF
+    return 2
+    ;;
+  esac
+}
+
+cmd_autoconnect() {
+  case "${1:-}" in
+  on)
+    set_cfg AUTOCONNECT yes
+    nm_autoconnect_set yes && echo "Autoconnect enabled."
+    ;;
+  off)
+    set_cfg AUTOCONNECT no
+    nm_autoconnect_set no && echo "Autoconnect disabled."
+    ;;
+  toggle)
+    if nm_autoconnect_get; then
+      cmd_autoconnect off && notify "Autoconnect disabled"
+    else
+      cmd_autoconnect on && notify "Autoconnect enabled"
+    fi
+    ;;
+  *)
+    nm_autoconnect_get && echo enabled || echo disabled
+    ;;
+  esac
+}
+
+# Verifies the pieces that live outside the plugin directory. An `omarchy
+# refresh shell` resets shell.json and drops the widget from the bar, which is
+# the quiet loss worth catching. Exits non-zero when anything needs attention.
+cmd_doctor() {
+  local problems=0
+
+  # Seed the config before checking for it, or a fresh install reports its own
+  # first run as a failure.
+  ensure_cfg
+
+  check() { # check <description> <test-result>
+    if [[ $2 == ok ]]; then
+      printf '  ok    %s\n' "$1"
+    else
+      printf '  FAIL  %s\n' "$1"
+      problems=$((problems + 1))
+    fi
+  }
+
+  # For things whose absence is a choice, not a fault: the PATH symlinks are
+  # optional and the eSIM tools gate one feature each.
+  note() { printf '  %-5s %s\n' "$2" "$1"; }
+
+  present() { [[ -e $1 ]] && echo ok || echo no; }
+  contains() { grep -q "$2" "$1" 2>/dev/null && echo ok || echo no; }
+  have() { command -v "$1" >/dev/null && echo ok || echo "--"; }
+
+  echo "user side:"
+  check "config $CONFIG" "$(present "$CONFIG")"
+  check "shell plugin installed" "$(present "$PLUGIN_DIR/manifest.json")"
+  note "omarchy-cellular on PATH (optional symlink)" "$(have omarchy-cellular)"
+
+  # The widget only shows up if the user's shell.json places it in a bar
+  # section. `omarchy refresh shell` resets that file to stock, which is
+  # exactly the kind of quiet loss this check exists to catch. Needs jq, so
+  # report that rather than blaming the widget for a missing parser.
+  if command -v jq >/dev/null; then
+    local in_bar=no
+    jq -e '[.bar.layout[]?[]? | select(.id == "relctx.cellular")] | length > 0' \
+      "$HOME/.config/omarchy/shell.json" >/dev/null 2>&1 && in_bar=ok
+    check "widget in the bar layout" "$in_bar"
+  else
+    note "widget in the bar layout (needs jq to tell)" "--"
+  fi
+
+  echo "tools:"
+  # jq is not optional: every lpac result is parsed through it.
+  check "jq" "$(have jq)"
+  note "lpac — eSIM profiles" "$(have lpac)"
+  note "zbarimg — QR scan" "$(have zbarimg)"
+  note "grim/slurp — QR scan" \
+    "$(command -v grim >/dev/null && command -v slurp >/dev/null && echo ok || echo '--')"
+
+
+  echo "connection:"
+  check "NetworkManager running" "$(nm_running && echo ok || echo no)"
+  check "gsm device present" "$([[ -n $(nm_device) ]] && echo ok || echo no)"
+  # The profile is created on the first connect, so its absence on a new
+  # install is a state, not a fault. Reporting it as a failure told a first-time
+  # user something was wrong when nothing was.
+  if nm_conn_exists; then
+    check "connection profile ($NM_CONN)" ok
+    # Autoconnect off is a choice; what matters is that the profile agrees with
+    # cellular.conf. Only comparable once there is a profile to compare.
+    local want_auto=no
+    [[ "$(get_cfg AUTOCONNECT)" == yes ]] && want_auto=yes
+    local have_auto=no
+    nm_autoconnect_get && have_auto=yes
+    check "autoconnect matches config ($have_auto)" \
+      "$([[ $want_auto == "$have_auto" ]] && echo ok || echo no)"
+  else
+    note "connection profile ($NM_CONN): created on first connect" "--"
+  fi
+
+  echo "config:"
+  check "provider database" \
+    "$([[ -x $PROVIDERS ]] || command -v "$PROVIDERS" >/dev/null && echo ok || echo no)"
+
+  # A config/hardware mismatch is not broken yet, but the next connect will
+  # switch slots and drop whatever is running now — worth saying out loud.
+  local want_slot cur_slot idx
+  want_slot=$(get_cfg SIM_SLOT)
+  idx=$(modem_index)
+  [[ -n $idx ]] && cur_slot=$(kv "$(modem_dump "$idx")" modem.generic.primary-sim-slot)
+  if [[ -n $want_slot && -n ${cur_slot:-} && $want_slot != "$cur_slot" ]]; then
+    note "SIM slot: config wants $want_slot, modem is on $cur_slot (next connect switches)" "--"
+  else
+    check "SIM slot matches the config" ok
+  fi
+
+  if ((problems)); then
+    echo
+    echo "$problems item(s) need attention."
+    echo "A dropped bar widget comes back with:"
+    echo "    omarchy plugin enable relctx.cellular --section right"
+    echo "Settings mismatches are yours to decide — edit $CONFIG."
+    return 1
+  fi
+  echo
+  echo "All good."
+  return 0
+}
+
+case "${1:-status}" in
+status) cmd_status ;;
+doctor) cmd_doctor ;;
+json | waybar) cmd_json ;;
+panel) cmd_panel "${2:-}" ;;
+present) wwan_hw_present ;;
+# Exit-status predicates, so the menu does not have to know the profile name.
+is-connected) nm_is_active ;;
+is-autoconnect) nm_autoconnect_get ;;
+notify-status) cmd_notify_status ;;
+apn-input) cmd_apn_input ;;
+connect | up) cmd_connect ;;
+disconnect | down) cmd_disconnect ;;
+toggle) cmd_toggle ;;
+restart) nm_apply && nm_up ;;  # explicit reconnect
+metered)
+  case "${2:-}" in
+  yes | on) set_cfg METERED yes ;;
+  no | off) set_cfg METERED no ;;
+  "")
+    echo "Configured: $(get_cfg METERED | grep . || echo yes)"
+    echo "NetworkManager: $(nmcli -g connection.metered connection show "$NM_CONN" 2>/dev/null)"
+    exit 0
+    ;;
+  *)
+    echo "usage: omarchy-cellular metered [yes|no]" >&2
+    exit 2
+    ;;
+  esac
+  nm_apply || exit 1
+  echo "Marked $(get_cfg METERED)."
+  ;;
+
+prefer)
+  case "${2:-}" in
+  cellular) set_cfg PREFER_CELLULAR yes ;;
+  wifi) set_cfg PREFER_CELLULAR no ;;
+  "")
+    if [[ $(get_cfg PREFER_CELLULAR) == yes ]]; then
+      echo "Preferring cellular (metric $(preferred_metric)), routing via $(route_via)"
+    else
+      echo "Preferring other links, routing via $(route_via)"
+    fi
+    exit 0
+    ;;
+  *)
+    echo "usage: omarchy-cellular prefer [cellular|wifi]" >&2
+    exit 2
+    ;;
+  esac
+  nm_apply || exit 1
+  # The metric is a property of the activation, so it only lands on the next one.
+  nm_is_active && nm_up
+  # NetworkManager adds 20000 to a default route until its connectivity check
+  # confirms the link works, so for the first few seconds the old link still
+  # wins and reporting immediately would print a stale answer.
+  want_dev=$([[ $(get_cfg PREFER_CELLULAR) == yes ]] && nm_ip_iface || echo "")
+  for _ in $(seq 1 20); do
+    via=$(route_via)
+    [[ -z $want_dev || $via == "$want_dev" ]] && break
+    sleep 1
+  done
+  echo "Routing via $(route_via)."
+  ;;
+sim) cmd_sim "${2:-}" "${3:-}" ;;
+profile) cmd_profile "${2:-}" "${3:-}" "${4:-}" ;;
+mode) cmd_mode "${2:-}" ;;
+at) cmd_at "${2:-}" ;;
+identify) cmd_identify ;;
+apn)
+  [[ ${2:-} == list ]] && { cmd_apn_list; exit $?; }
+  # An explicitly empty argument clears the APN, which is a real setting: some
+  # profiles negotiate it themselves and refuse the connection if one is set.
+  # Distinguish that from no argument at all.
+  (($# >= 2)) || {
+    echo "usage: omarchy-cellular apn <name>        set the APN" >&2
+    echo "       omarchy-cellular apn \'\'          clear it (the network chooses)" >&2
+    echo "       omarchy-cellular apn list        show what the modem is provisioned with" >&2
+    exit 2
+  }
+  set_cfg APN "$2"
+  if [[ -n $2 ]]; then
+    echo "APN set to $2."
+  else
+    echo "APN cleared; the network will choose."
+  fi
+  [[ ${OMARCHY_CELLULAR_QUIET:-0} == 1 ]] || echo "Run 'omarchy-cellular apply' to activate it."
+  ;;
+apply)
+  require_system_half || exit 1
+  # Push the config onto the profile. Only re-activate if cellular was
+  # already up: applying settings should not dial on its own, and on a SIM that
+  # cannot register that means waiting out the whole connect timeout.
+  nm_apply && { ! nm_is_active || nm_up; }
+  ;;
+carrier) cmd_carrier "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+limit) cmd_limit "${2:-}" "${3:-}" "${4:-}" ;;
+autoconnect) cmd_autoconnect "${2:-}" ;;
+log) journalctl -u NetworkManager -n 50 --no-pager ;;
+config) "${EDITOR:-nano}" "$CONFIG" ;;
+*)
+  cat >&2 <<'EOF'
+usage: omarchy-cellular <command>
+
+  status              show modem/connection state (default)
+  connect|disconnect  bring cellular up or down
+  toggle              connect if down, disconnect if up
+  restart             reconnect
+  mode [auto|5g|4g|3g]  show or set the radio mode
+  at '<command>'       send a raw AT command (diagnostics)
+  identify            re-read ICCID/EID that ModemManager cannot
+  apply               re-read cellular.conf and reconnect
+  sim [1|2] [--force] select physical SIM (1) or eSIM (2); bare: show config
+  profile ...         eSIM profiles: list, enable, delete, nickname, download, scan
+  carrier ...         pick country/carrier and apply its APN (see: carrier)
+  limit ...           monthly/daily data cap with auto-cutoff (see: limit)
+  apn <name>          set the APN by hand
+  apn list            APNs the carrier provisioned into the modem
+  autoconnect on|off  connect automatically at boot
+  prefer [cellular|wifi]  which link carries traffic when both are up
+  metered [yes|no]    tell other software this connection costs money
+  log                 recent connection log
+  doctor              verify the patch is still fully in place
+  config              edit ~/.config/omarchy/cellular.conf
+  present             exit 0 if a cellular modem is present
+  json                JSON status feed (waybar format)
+  panel               key=value status feed for the shell panel
+EOF
+  exit 2
+  ;;
+esac

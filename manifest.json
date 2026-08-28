@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "relctx.cellular",
+  "name": "Cellular",
+  "version": "1.0.1",
+  "author": "relctx",
+  "license": "MIT",
+  "description": "Cellular (WWAN) indicator and controls for Omarchy",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "shell/CellularPanel.qml"
+  },
+  "barWidget": {
+    "displayName": "Cellular",
+    "description": "Cellular signal with a control panel: connect, link stats, data cap, SIM slot, eSIM profiles, APN",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
