@@ -1551,14 +1551,18 @@ cmd_profile_list() {
   local json
   json=$(lpac_run profile list) || return 1
 
+  # One field per line is the panel's protocol, and the card supplies these
+  # names. A newline inside one emits extra profile.N.field= lines that the
+  # panel reads as real, so control characters are folded to spaces here.
   jq -r '
+    def flat: tostring | gsub("[[:cntrl:]]"; " ");
     (.payload.data // [])
     | to_entries[]
-    | "profile.\(.key).iccid=\(.value.iccid)\n"
-    + "profile.\(.key).name=\(.value.profileNickname // .value.profileName // "Unnamed")\n"
-    + "profile.\(.key).provider=\(.value.serviceProviderName // "")\n"
-    + "profile.\(.key).state=\(.value.profileState)\n"
-    + "profile.\(.key).class=\(.value.profileClass)"
+    | "profile.\(.key).iccid=\((.value.iccid // "") | flat)\n"
+    + "profile.\(.key).name=\((.value.profileNickname // .value.profileName // "Unnamed") | flat)\n"
+    + "profile.\(.key).provider=\((.value.serviceProviderName // "") | flat)\n"
+    + "profile.\(.key).state=\((.value.profileState // "") | flat)\n"
+    + "profile.\(.key).class=\((.value.profileClass // "") | flat)"
   ' <<<"$json" 2>/dev/null
 }
 
@@ -1574,8 +1578,14 @@ cmd_scan() {
   }
 
   local shot region code
-  shot=$(mktemp --suffix=.png)
-  trap 'rm -f "$shot"' RETURN
+  # The capture is whatever was on screen, including the activation code, so it
+  # belongs in the 0700 runtime dir rather than /tmp.
+  mkdir -p "$CACHE_DIR"
+  shot=$(mktemp --suffix=.png "$CACHE_DIR/scan.XXXXXXXX") || {
+    echo "Could not create a temporary file." >&2
+    return 1
+  }
+  trap 'rm -f -- "$shot"' RETURN
 
   region=$(slurp -d 2>/dev/null) || {
     echo "Cancelled." >&2
@@ -1595,8 +1605,10 @@ cmd_scan() {
     return 1
   }
 
-  # An eSIM QR contains an LPA activation code. Anything else is not one.
-  [[ $code == LPA:* ]] || {
+  # SGP.22 activation code: LPA:1$<smdp-server>$<matching-id> with two optional
+  # fields after. Checked against that grammar, not just the prefix, because
+  # this comes out of an image and goes on to lpac.
+  [[ $code =~ ^LPA:1\$[A-Za-z0-9.-]{1,255}\$[A-Za-z0-9._~-]{1,128}(\$[A-Za-z0-9._~-]{0,128}){0,2}$ ]] || {
     echo "That QR code is not an eSIM activation code:" >&2
     echo "  $code" >&2
     notify "Not an eSIM activation code"
