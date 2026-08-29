@@ -17,6 +17,31 @@
     "description": "Cellular signal with a control panel: connect, link stats, data cap, SIM slot, eSIM profiles, APN",
     "category": "Network",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "interval": 60,
+      "sparkline": true,
+      "smsNotify": true
+    },
+    "schema": [
+      {
+        "key": "interval",
+        "type": "number",
+        "label": "Fallback refresh seconds (events drive updates; this is the safety net)",
+        "defaultValue": 60
+      },
+      {
+        "key": "sparkline",
+        "type": "boolean",
+        "label": "Show the signal history sparkline",
+        "defaultValue": true
+      },
+      {
+        "key": "smsNotify",
+        "type": "boolean",
+        "label": "Notify when a text message arrives",
+        "defaultValue": true
+      }
+    ]
   }
 }

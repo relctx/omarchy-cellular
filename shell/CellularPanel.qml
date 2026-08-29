@@ -788,7 +788,16 @@ Panel {
       for (var i = 0; i < list.length; i++) {
         var m = list[i]
         var key = (m.number || "") + "|" + (m.time || "") + "|" + (m.text || "").slice(0, 40)
-        if (!first && !seen[key] && m.kind === "received") {
+        // Unseen, received, recent, and wanted: a modem re-enumeration
+        // replays Added for the whole store, and a partial read during the
+        // churn can make old mail look new — age is the backstop.
+        var fresh = false
+        if (m.time) {
+          var t = Date.parse(m.time.replace(" ", "T"))
+          fresh = !isNaN(t) && Date.now() - t < 600000
+        }
+        if (!first && !seen[key] && m.kind === "received" && fresh
+            && root.setting("smsNotify", true)) {
           notifyProc.command = ["omarchy-notification-send", "-g", "󰍡",
             "Text from " + (m.number || "unknown"),
             (m.text || "").slice(0, 120)]
@@ -1061,6 +1070,7 @@ Panel {
         // instantaneous number cannot — is it degrading, and did moving help.
         Column {
           visible: root.hwPresent && root.rsrpHistory.length >= 2
+                   && root.setting("sparkline", true)
           width: parent.width
           spacing: Style.space(2)
 
