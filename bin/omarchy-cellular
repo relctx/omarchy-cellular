@@ -1641,7 +1641,131 @@ read_signal() {
   done
 }
 
-# The event feed lands here on every change, which makes this the reaction
+# One identity per line: every card this modem can be, flattened. Physical
+# slots come from ModemManager's slot objects, which answer for inactive
+# cards too; eSIM profiles come from the cache the last profile list wrote,
+# since the eUICC itself only answers while selected.
+cmd_sims() {
+  local dump n i sp iccid name active_i eslot
+  dump=$(modem_dump "$(modem_index)") || return 1
+  active_i=$(active_iccid)
+  eslot=$(esim_slot || true)
+
+  n=$(kv "$dump" modem.generic.sim-slots.length)
+  [[ $n =~ ^[0-9]+$ ]] || n=0
+
+  local idx=0
+  for ((i = 1; i <= n; i++)); do
+    [[ -n $eslot && $i == "$eslot" ]] && continue
+    sp=$(kv "$dump" "modem.generic.sim-slots.value[$i]")
+    [[ -n $sp && $sp != / ]] || continue
+    iccid=$(sim_property "$sp" SimIdentifier)
+    [[ -n $iccid ]] || continue
+    name=$(sim_property "$sp" OperatorName)
+    [[ -n $name ]] || name=$(sed -n 's/^CARRIER=//p' "$CARD_DIR/$iccid.conf" 2>/dev/null)
+    printf 'sim.%s.iccid=%s\n' "$idx" "$iccid"
+    printf 'sim.%s.name=%s\n' "$idx" "${name:-Physical SIM}"
+    printf 'sim.%s.kind=physical\n' "$idx"
+    printf 'sim.%s.slot=%s\n' "$idx" "$i"
+    printf 'sim.%s.active=%s\n' "$idx" "$([[ $iccid == "$active_i" ]] && echo yes || echo no)"
+    idx=$((idx + 1))
+  done
+
+  # Cached profiles; the test-class ones stay in Manage, not here.
+  local ci cname cprov cstate cclass
+  if [[ -r $STATE_DIR/profiles.cache ]]; then
+    local k v cur=-1
+    declare -A P
+    while IFS='=' read -r k v; do
+      [[ $k =~ ^profile\.([0-9]+)\.([a-z]+)$ ]] || continue
+      P["${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"]=$v
+    done <"$STATE_DIR/profiles.cache"
+    for ((i = 0; i <= 32; i++)); do
+      ci=${P["$i.iccid"]:-}
+      [[ -n $ci ]] || break
+      cclass=${P["$i.class"]:-}
+      [[ $cclass == test ]] && continue
+      cname=${P["$i.name"]:-}
+      cprov=${P["$i.provider"]:-}
+      printf 'sim.%s.iccid=%s\n' "$idx" "$ci"
+      printf 'sim.%s.name=%s\n' "$idx" "${cname:-$cprov}"
+      printf 'sim.%s.provider=%s\n' "$idx" "$cprov"
+      printf 'sim.%s.kind=esim\n' "$idx"
+      printf 'sim.%s.slot=%s\n' "$idx" "${eslot:-}"
+      printf 'sim.%s.active=%s\n' "$idx" "$([[ $ci == "$active_i" ]] && echo yes || echo no)"
+      idx=$((idx + 1))
+    done
+  fi
+}
+
+# Become one of them. Which mechanics that takes -- a slot switch, a profile
+# enable, or both under the one authorization -- is this command's business,
+# not the caller's.
+cmd_use() {
+  local want="${1:-}"
+  [[ $want =~ ^[0-9]{10,22}$ ]] || {
+    echo "usage: omarchy-cellular use <iccid>   (see: omarchy-cellular sims)" >&2
+    return 2
+  }
+
+  if [[ $(active_iccid) == "$want" ]]; then
+    echo "Already using that card."
+    return 0
+  fi
+
+  local was_active=0
+  nm_is_active && was_active=1
+
+  # A physical card is a slot switch.
+  local dump n i sp
+  dump=$(modem_dump "$(modem_index)")
+  n=$(kv "$dump" modem.generic.sim-slots.length)
+  for ((i = 1; i <= ${n:-0}; i++)); do
+    sp=$(kv "$dump" "modem.generic.sim-slots.value[$i]")
+    [[ -n $sp && $sp != / ]] || continue
+    if [[ $(sim_property "$sp" SimIdentifier) == "$want" ]]; then
+      cmd_sim "$i"
+      return
+    fi
+  done
+
+  # An eSIM profile: reach the eUICC and enable it, one authorization even
+  # when that includes selecting the eUICC's slot first.
+  local eslot
+  eslot=$(esim_slot) || eslot=""
+  need_jq || return 1
+  have_lpa || {
+    echo "$LPA_HINT" >&2
+    return 1
+  }
+  echo "Switching to that profile (this reconnects the modem)…"
+  esim_run "$eslot" 1 profile enable "$want" true || return 1
+  jq -e '.payload.code == 0' <<<"$ESIM_JSON" >/dev/null 2>&1 || {
+    local why
+    why=$(jq -r '.payload.data // .payload.message // empty' <<<"$ESIM_JSON" 2>/dev/null | head -1)
+    echo "Could not enable that profile${why:+ — $why}." >&2
+    notify "Profile switch failed${why:+ — $why}"
+    return 1
+  }
+  [[ -n $ESIM_LIST_JSON ]] && profiles_render "$ESIM_LIST_JSON" >/dev/null
+
+  sim_follow_profile "$want"
+  cache_flush
+  card_wait_resolvable
+  nm_apply >/dev/null 2>&1 || true
+  read_state
+  notify "Now using ${SIM_OPERATOR:-the selected card}"
+  if ((was_active)); then
+    if nm_up; then
+      read_state
+      notify "Connected to ${OPERATOR:-cellular network}"
+    else
+      notify "Switched — reconnect pending"
+    fi
+  fi
+}
+
+# The event feed lands here on every change, which makes this the reaction# The event feed lands here on every change, which makes this the reaction
 # point: when the card is not the one whose settings were last pushed, push
 # the right ones. Modify only -- the switch flows reconnect themselves, and a
 # card change without them (mmcli by hand) should not cost a live connection.
@@ -1652,6 +1776,11 @@ card_track() {
   # ensure runs even for an unchanged card: it also carries a pre-split plan
   # onto a card file that lacks one, and both checks are two stats and a grep.
   card_ensure
+  # Remember the carrier's name while the card is the one that answers; the
+  # SIM list needs it later, when this card is inactive and silent.
+  if [[ -n ${SIM_OPERATOR:-} && -z $(get_cfg CARRIER) ]]; then
+    set_cfg CARRIER "$SIM_OPERATOR"
+  fi
   last=$(cat "$f" 2>/dev/null)
   [[ $i == "$last" ]] && return 0
   nm_apply >/dev/null 2>&1 || return 0
@@ -2364,7 +2493,11 @@ cmd_profile_list() {
 # names. A newline inside one emits extra profile.N.field= lines that the
 # panel reads as real, so control characters are folded to spaces here.
 profiles_render() {
-  jq -r '
+  # Every successful list passes through here, so it doubles as the cache
+  # writer: the SIM list needs profile names while the eUICC is not the
+  # selected card and cannot be asked.
+  local out
+  out=$(jq -r '
     def flat: tostring | gsub("[[:cntrl:]]"; " ");
     (.payload.data // [])
     | to_entries[]
@@ -2373,7 +2506,10 @@ profiles_render() {
     + "profile.\(.key).provider=\((.value.serviceProviderName // "") | flat)\n"
     + "profile.\(.key).state=\((.value.profileState // "") | flat)\n"
     + "profile.\(.key).class=\((.value.profileClass // "") | flat)"
-  ' <<<"$1" 2>/dev/null
+  ' <<<"$1" 2>/dev/null)
+  [[ -n $out ]] || return 0
+  mkdir -p "$STATE_DIR" && printf '%s\n' "$out" >"$STATE_DIR/profiles.cache"
+  printf '%s\n' "$out"
 }
 
 # Runs a mutating profile command and the list that follows it inside ONE
@@ -3075,6 +3211,8 @@ at) cmd_at "${2:-}" ;;
 pin) cmd_pin "${2:-}" "${3:-}" "${4:-}" ;;
 signal) cmd_signal ;;
 esim-session) cmd_esim_session ;;
+sims) cmd_sims ;;
+use) cmd_use "${2:-}" ;;
 mode) cmd_mode "${2:-}" ;;
 identify) cmd_identify ;;
 apn)
@@ -3119,6 +3257,8 @@ usage: omarchy-cellular <command>
   mode [auto|5g|4g|3g]  show or set the radio mode
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
+  sims                every card this modem can be, one per line
+  use <iccid>         become one of them: slot switch, profile enable, or both
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
   signal              every metric the modem reports, RSRQ included
   pin ...             SIM lock: status, unlock, puk, on|off, change
