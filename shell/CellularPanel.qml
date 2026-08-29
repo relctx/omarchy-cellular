@@ -209,10 +209,12 @@ Panel {
            : v >= -95 ? "poor" : "weak"
     return ""
   }
-  function sigWithTier(kind, raw) {
-    if (!raw) return "—"
+  // Color carries the judgment the tier tables encode: red where the link
+  // is in trouble, plain otherwise — the same language ping and packet loss
+  // already speak.
+  function sigColor(kind, raw) {
     var t = sigTier(kind, raw)
-    return t ? raw + "  ·  " + t : raw
+    return (t === "poor" || t === "cell edge" || t === "weak") ? urgent : barForeground
   }
 
   // Strength history for the sparkline, fed by whatever updates the feed —
@@ -292,6 +294,126 @@ Panel {
 
   // The card list, parsed from the same feed as everything else.
   property var sims: []
+
+  // Diagnostics: read on demand behind one authorization, never polled.
+  property var diagCells: []
+  property var diagServing: ({})
+  property bool diagLoading: false
+  property string codeReply: ""
+
+  property var diagCa: []
+
+  // One model for the table: the carriers actually in use lead it — primary
+  // then activated secondaries, each with its width — then everything else
+  // the radio hears. Measured cells merge with carriers by band and cell id.
+  readonly property var diagRows: {
+    var out = []
+    var claimed = {}
+    for (var i = 0; i < diagCells.length; i++) {
+      var c = diagCells[i]
+      var isServing = c.pci === diagServing.pci
+      var bandNum = String(c.band || "").replace(/^[bn]/, "")
+      var role = isServing ? "P" : ""
+      var w = isServing ? (diagServing.width || "") : ""
+      for (var k = 0; k < diagCa.length; k++) {
+        var a = diagCa[k]
+        if (a.band === bandNum && a.pci === c.pci) {
+          role = a.role
+          w = a.width || w
+          claimed[k] = true
+          break
+        }
+      }
+      out.push({
+        serving: isServing || role === "P",
+        role: role,
+        gen: String(c.band || "").charAt(0) === "n" ? "5G" : "LTE",
+        band: bandNum + (c.name && c.name !== "5G NR" ? " " + c.name : ""),
+        ch: (isServing ? (diagServing.channel || c.chan) : c.chan) || "—",
+        id: c.pci,
+        width: w,
+        rsrp: c.rsrp,
+        rssi: c.rssi || ""
+      })
+    }
+    // Carriers in use that no measured row matched still belong in the list.
+    for (k = 0; k < diagCa.length; k++) {
+      if (claimed[k]) continue
+      a = diagCa[k]
+      out.push({
+        serving: a.role === "P",
+        role: a.role,
+        gen: "LTE",
+        band: a.band,
+        ch: a.chan && a.chan !== "0" ? a.chan : "—",
+        id: a.pci,
+        width: a.width,
+        rsrp: "",
+        rssi: ""
+      })
+    }
+    out.sort(function (a, b) {
+      var r = function (x) { return x.role === "P" ? 0 : x.role === "S" ? 1 : 2 }
+      return r(a) - r(b)
+    })
+    // The camped cell is not always in the measured list; the table still
+    // owes it a row.
+    if (diagServing.band !== undefined && (out.length === 0 || !out[0].serving)) {
+      out.unshift({
+        serving: true,
+        gen: String(diagServing.band || "").indexOf("nr5g") === 0 ? "5G" : "LTE",
+        band: String(diagServing.band || "").replace(/^eutran-|^nr5g-|^b/, "")
+              + (diagServing.name ? " " + diagServing.name : ""),
+        ch: diagServing.channel || "—",
+        id: diagServing.pci || "—",
+        width: diagServing.width || "",
+        rsrp: "",
+        rssi: ""
+      })
+    }
+    return out
+  }
+
+  readonly property var diagServingCell: {
+    for (var i = 0; i < diagCells.length; i++)
+      if (diagCells[i].pci === diagServing.pci) return diagCells[i]
+    return null
+  }
+  readonly property var diagOtherCells: {
+    var out = []
+    for (var i = 0; i < diagCells.length; i++)
+      if (diagCells[i].pci !== diagServing.pci) out.push(diagCells[i])
+    return out
+  }
+
+  // Radio jargon translated: which generation, which numbered band, and the
+  // spectrum a person might recognise.
+  function bandLabel(band, name) {
+    var b = String(band || "")
+    var nrFreq = { 25: "1900 MHz", 41: "2.5 GHz", 66: "AWS", 71: "600 MHz",
+                   77: "3.7 GHz", 78: "3.5 GHz", 260: "mmWave", 261: "mmWave" }
+    var m = b.match(/^nr5g-(\d+)$|^n(\d+)$/)
+    if (m) {
+      var n = m[1] || m[2]
+      return "5G · band " + n + (nrFreq[n] ? " (" + nrFreq[n] + ")" : "")
+    }
+    m = b.match(/^eutran-(\d+)$|^b(\d+)$/)
+    if (m) {
+      var e = m[1] || m[2]
+      return "LTE · band " + e + (name ? " (" + name + ")" : "")
+    }
+    return b
+  }
+
+  function parseServing(text) {
+    var out = {}
+    var lines = (text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^serving\.([a-z]+)=(.*)$/)
+      if (m) out[m[1]] = m[2]
+    }
+    return out
+  }
 
   function parseIndexed(text, prefix) {
     var byIndex = {}
@@ -637,6 +759,34 @@ Panel {
     }
   }
 
+  Process {
+    id: diagProc
+    command: [root.cli, "cells"]
+    stdout: StdioCollector { id: diagOut; waitForEnd: true }
+    stderr: StdioCollector { id: diagErr; waitForEnd: true }
+    onExited: function (code) {
+      root.diagLoading = false
+      if (code === 0) {
+        root.diagServing = root.parseServing(diagOut.text)
+        root.diagCells = root.parseIndexed(diagOut.text, "cell")
+        root.diagCa = root.parseIndexed(diagOut.text, "ca")
+      } else {
+        root.lastError = (diagErr.text || "").trim().split("\n")[0] || "Could not read the cells."
+      }
+    }
+  }
+
+  Process {
+    id: codeProc
+    stdout: StdioCollector { id: codeOut; waitForEnd: true }
+    stderr: StdioCollector { id: codeErr; waitForEnd: true }
+    onExited: function (code) {
+      var t = (codeOut.text || "").trim()
+      var e = (codeErr.text || "").trim()
+      root.codeReply = t !== "" ? t : e !== "" ? e : "No answer."
+    }
+  }
+
   Process { id: copyProc }
 
   Process {
@@ -828,9 +978,9 @@ Panel {
             width: (parent.width - parent.spacing) / 2
             spacing: Style.spacing.labelGap
             InfoPair { label: "Operator"; value: root.info.operator || "—" }
-            InfoPair { label: "Signal"; value: (root.info.signal || "0") + "%" }
-            InfoPair { label: "RSSI"; value: root.sigWithTier("rssi", root.info.sig_rssi) }
-            InfoPair { label: "RSRQ"; value: root.sigWithTier("rsrq", root.info.sig_rsrq) }
+            InfoPair { label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
+            InfoPair { label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
+            InfoPair { label: "RSRQ"; value: root.info.sig_rsrq || "—"; valueColor: root.sigColor("rsrq", root.info.sig_rsrq) }
             InfoPair {
               label: "Ping"
               value: root.formatPing(root.pingLatency)
@@ -850,8 +1000,8 @@ Panel {
               value: root.roaming ? "Yes" : "No"
               valueColor: root.roaming ? root.urgent : root.barForeground
             }
-            InfoPair { label: "RSRP"; value: root.sigWithTier("rsrp", root.info.sig_rsrp) }
-            InfoPair { label: "SNR"; value: root.sigWithTier("snr", root.info.sig_snr) }
+            InfoPair { label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
+            InfoPair { label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
             InfoPair {
               label: "Packet Loss"
               value: root.formatLoss(root.packetLoss)
@@ -1551,6 +1701,20 @@ Panel {
             fontFamily: root.fontFamily
             onClicked: root.toggleMgmt("apn")
           }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󱄙"
+            tooltipText: "Cell diagnostics"
+            bordered: true
+            active: root.mgmtView === "diag"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("diag")
+          }
         }
 
         Text {
@@ -1562,6 +1726,239 @@ Panel {
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+        }
+
+        // ---------- Diagnostics (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "diag"
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.mgmtView === "diag"
+          width: parent.width
+          spacing: Style.space(6)
+
+          Item {
+            width: parent.width
+            implicitHeight: diagHeader.implicitHeight
+
+            PanelSectionHeader {
+              id: diagHeader
+              text: "CELL DIAGNOSTICS"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.verticalCenter: diagHeader.verticalCenter
+              anchors.verticalCenterOffset: Math.round(diagHeader.topPadding / 2)
+              text: root.diagLoading ? "Reading…" : "Read cells"
+              color: root.barForeground
+              opacity: diagReadArea.containsMouse || root.diagLoading ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: diagReadArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                enabled: !root.diagLoading
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.diagLoading = true
+                  diagProc.running = true
+                }
+              }
+
+              PanelToolTip {
+                visible: diagReadArea.containsMouse
+                text: "Asks the modem for every cell it can hear"
+                fontFamily: root.fontFamily
+              }
+            }
+          }
+
+          // A table with headers where headers go: columns, values beneath.
+          Column {
+            id: diagTable
+            visible: root.diagRows.length > 0
+            width: parent.width
+            spacing: Style.space(2)
+
+            readonly property real cId: width * 0.10
+            readonly property real cGen: width * 0.12
+            readonly property real cRole: width * 0.06
+            readonly property real cBand: width * 0.18
+            readonly property real cWidth: width * 0.13
+            readonly property real cCh: width * 0.15
+            readonly property real cRssi: width * 0.13
+
+            component DiagCell: Text {
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: {
+                var n = 0
+                for (var i = 0; i < root.diagRows.length; i++)
+                  if (root.diagRows[i].role !== "") n++
+                return n > 1
+              }
+              width: parent.width
+              text: {
+                var parts = [], total = 0
+                for (var i = 0; i < root.diagRows.length; i++) {
+                  var r = root.diagRows[i]
+                  if (r.role === "" || !r.width) continue
+                  parts.push(r.width)
+                  total += parseInt(r.width)
+                }
+                return "Aggregated  " + parts.join(" + ") + " = " + total + " MHz"
+              }
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Row {
+              width: parent.width
+              Repeater {
+                model: [["ID", diagTable.cId], ["TECH", diagTable.cGen],
+                        ["CA", diagTable.cRole],
+                        ["BAND", diagTable.cBand], ["WIDTH", diagTable.cWidth],
+                        ["CH", diagTable.cCh], ["RSSI", diagTable.cRssi]]
+                DiagCell {
+                  required property var modelData
+                  width: modelData[1]
+                  text: modelData[0]
+                  opacity: 0.45
+                  font.letterSpacing: 1
+                }
+              }
+              DiagCell {
+                width: diagTable.width - diagTable.cGen - diagTable.cBand
+                       - diagTable.cWidth - diagTable.cCh - diagTable.cId
+                       - diagTable.cRssi - diagTable.cRole
+                horizontalAlignment: Text.AlignRight
+                text: "RSRP"
+                opacity: 0.45
+                font.letterSpacing: 1
+              }
+            }
+
+            Repeater {
+              model: root.diagRows
+              delegate: Row {
+                id: diagRow
+                required property var modelData
+                width: diagTable.width
+
+                DiagCell {
+                  width: diagTable.cId
+                  text: diagRow.modelData.id
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cGen
+                  text: diagRow.modelData.gen
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cRole
+                  text: diagRow.modelData.role
+                  color: Color.accent
+                  opacity: diagRow.modelData.role ? 1 : 0
+                  font.weight: Font.DemiBold
+                }
+                DiagCell {
+                  width: diagTable.cBand
+                  text: diagRow.modelData.band
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cWidth
+                  text: diagRow.modelData.width ? diagRow.modelData.width + " MHz" : ""
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cCh
+                  text: diagRow.modelData.ch
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                }
+                DiagCell {
+                  width: diagTable.cRssi
+                  text: diagRow.modelData.rssi || "—"
+                  color: diagRow.modelData.rssi
+                         ? root.sigColor("rssi", diagRow.modelData.rssi)
+                         : root.barForeground
+                  opacity: diagRow.modelData.serving ? 0.9 : 0.65
+                }
+                DiagCell {
+                  width: diagTable.width - diagTable.cGen - diagTable.cBand
+                         - diagTable.cWidth - diagTable.cCh - diagTable.cId
+                         - diagTable.cRssi - diagTable.cRole
+                  horizontalAlignment: Text.AlignRight
+                  text: diagRow.modelData.rsrp || "—"
+                  color: diagRow.modelData.rsrp
+                         ? root.sigColor("rsrp", diagRow.modelData.rsrp)
+                         : root.barForeground
+                  opacity: diagRow.modelData.serving ? 1 : 0.75
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.diagCells.length === 0 && !root.diagLoading
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Nothing read yet. Read cells asks the modem — one authorization."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          TextField {
+            id: carrierCodeField
+            width: parent.width
+            font.pixelSize: Style.font.caption
+            verticalPadding: Style.space(2)
+            placeholderText: "Carrier code — *121#, #3282…"
+            foreground: root.barForeground
+            onAccepted: {
+              if (text.trim() === "" || codeProc.running) return
+              root.codeReply = "Sending…"
+              codeProc.command = [root.cli, "code", text.trim()]
+              codeProc.running = true
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.codeReply !== ""
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: root.codeReply
+            color: root.barForeground
+            opacity: 0.75
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
         }
 
         // ---------- APN (behind its chip) ----------
