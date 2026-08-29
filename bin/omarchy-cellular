@@ -560,7 +560,7 @@ cmd_status() {
   nosim)
     if [[ $ACTIVE_SLOT == 2 ]]; then
       echo "Cellular: the eSIM (slot 2) is empty — no profile is installed on it."
-      echo "  Install one with an LPA client (e.g. lpac), or switch back: omarchy-cellular sim 1"
+      echo "  Install one with an LPA client (e.g. lpac), or switch back: omarchy-cellular sim physical"
     else
       echo "Cellular: SIM slot ${ACTIVE_SLOT:-?} is empty — insert a card or switch slots."
     fi
@@ -1047,39 +1047,38 @@ cmd_identify() {
   }
 
   mkdir -p "$STATE_DIR"
-  out=$(cmd_at 'AT+QCCID' 2>/dev/null)
-  iccid=$(sed -n 's/^+QCCID:[[:space:]]*\([0-9]\+\).*/\1/p' <<<"$out" | head -1)
-  if [[ -n $iccid ]]; then
+
+  # ModemManager reads both of these off the SIM object without any privilege.
+  # This command exists for when that object is unreadable, so it takes what is
+  # there and only elevates for what is missing.
+  out=$(mmcli -i "$simpath" -K 2>/dev/null)
+  iccid=$(kv "$out" sim.properties.iccid)
+  if [[ -n $iccid && $iccid != "--" ]]; then
     printf '%s' "$iccid" >"$STATE_DIR/iccid"
     echo "ICCID: $iccid"
   else
     echo "The modem did not report an ICCID." >&2
   fi
 
-  # The EID is the eUICC's own identity and ModemManager usually reports it,
-  # but not when reading the SIM object crashes. lpac can, so use it when it
-  # happens to be installed -- optional, never a dependency, and it has to stop
-  # ModemManager to get the port to itself.
-  if [[ ! -s $STATE_DIR/eid ]] && command -v lpac >/dev/null; then
-    local port eid
-    port=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (at)$|\1|p' <<<"$dump" | head -1)
-    if [[ -n $port ]]; then
-      echo "Reading the EID with lpac (ModemManager pauses briefly)…"
-      if dev_node_ok "/dev/$port"; then
-        eid=$(pkexec sh -c '
-          systemctl stop ModemManager
-          LPAC_APDU=at LPAC_APDU_AT_DEVICE="$1" lpac chip info 2>/dev/null
-          systemctl start ModemManager' sh "/dev/$port" |
-          sed -n 's/.*"eidValue":"\([0-9]\+\)".*/\1/p' | head -1)
-      fi
+  local eid
+  eid=$(kv "$out" sim.properties.eid)
+  [[ $eid == "--" ]] && eid=""
+  [[ -n $eid ]] && printf '%s' "$eid" >"$STATE_DIR/eid"
+
+  # Only the eUICC itself can supply an EID ModemManager did not report, and
+  # only while it is the active card. One authorization, no stopping anything.
+  if [[ ! -s $STATE_DIR/eid ]] && [[ $(esim_transport) == mbim ]]; then
+    echo "Reading the EID from the eUICC…"
+    if esim_run "" 0 chip info >/dev/null 2>&1; then
+      eid=$(jq -r '.payload.data.eidValue // empty' <<<"$ESIM_JSON" 2>/dev/null)
       [[ -n $eid ]] && printf '%s' "$eid" >"$STATE_DIR/eid"
     fi
   fi
 
   if [[ -s $STATE_DIR/eid ]]; then
     echo "EID:   $(cat "$STATE_DIR/eid")"
-  elif ! command -v lpac >/dev/null; then
-    echo "EID:   unavailable (ModemManager cannot read it; install lpac to fetch it)" >&2
+  else
+    echo "EID:   unavailable — the eUICC has to be the active SIM to be read." >&2
   fi
   return 0
 }
@@ -1227,6 +1226,8 @@ cmd_panel() {
   printf 'slot1_sim=%s\n' "$SLOT1_SIM"
   printf 'slot2_sim=%s\n' "$SLOT2_SIM"
   printf 'slot=%s\n' "$(get_cfg SIM_SLOT)"
+  printf 'esim_transport=%s\n' "$(esim_transport)"
+  printf 'esim_slot=%s\n' "$(esim_slot || true)"
   printf 'apn=%s\n' "$(get_cfg APN)"
   printf 'metered=%s\n' "$(get_cfg METERED | grep . || echo yes)"
   printf 'prefer_cellular=%s\n' "$([[ $(get_cfg PREFER_CELLULAR) == yes ]] && echo yes || echo no)"
@@ -1427,85 +1428,238 @@ at_port() {
   return 1
 }
 
+# The MBIM control port, found the same way as the AT one.
+mbim_port() {
+  local d n
+  for d in /sys/class/wwan/*/; do
+    [[ -r $d/type ]] || continue
+    [[ $(cat "$d/type" 2>/dev/null) == MBIM ]] || continue
+    n=$(basename "$d")
+    [[ -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  done
+
+  local idx
+  idx=$(modem_index) || return 1
+  [[ -n $idx ]] || return 1
+  n=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (mbim)$|\1|p' <<<"$(modem_dump "$idx")" | head -1)
+  [[ -n $n && -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  return 1
+}
+
+# Which slot holds the eUICC. Only an eUICC has an EID, so a slot whose SIM
+# reports one is the eSIM; sim-type would say so directly but plenty of modems
+# leave it "--", this one included. Prints the slot number, or fails when no
+# slot advertises an eUICC -- including when the eSIM is the inactive card and
+# the modem declines to read it until it is selected.
+esim_slot() {
+  local dump n i sp props eid st
+  dump=$(modem_dump "$(modem_index)") || return 1
+  n=$(kv "$dump" modem.generic.sim-slots.length)
+  [[ $n =~ ^[0-9]+$ ]] || return 1
+
+  for ((i = 1; i <= n; i++)); do
+    sp=$(kv "$dump" "modem.generic.sim-slots.value[$i]")
+    [[ -n $sp && $sp != / ]] || continue
+    props=$(mmcli -i "${sp##*/}" -K 2>/dev/null) || continue
+    eid=$(kv "$props" sim.properties.eid)
+    st=$(kv "$props" sim.properties.sim-type)
+    [[ $eid == "--" ]] && eid=""
+    if [[ -n $eid || ${st,,} == esim ]]; then
+      printf '%s' "$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Whether this lpac was built with a given APDU driver. Arch's lpac package
+# ships at, pcsc and stdio only; lpac-git adds mbim and qmi. LPAC_APDU is set
+# for the query because a bare 'driver list' initialises the default backend
+# and fails on any machine without pcscd running.
+lpac_has_driver() {
+  LPAC_APDU=$1 lpac driver list 2>/dev/null |
+    jq -e --arg d "$1" '.payload.LPAC_APDU | index($d)' >/dev/null 2>&1
+}
+
+# Which transport an eSIM operation will use: mbim leaves the connection up,
+# at takes it down, none means no LPA is installed. The lpac probe spawns a
+# process, and the panel asks on every poll, so the answer is cached against
+# the binary's mtime and size and re-probed only when lpac itself changes.
+esim_transport() {
+  have_lpa || { printf 'none'; return 0; }
+
+  mbim_port >/dev/null 2>&1 || { printf 'none'; return 0; }
+
+  local bin stamp cache
+  bin=$(command -v lpac)
+  stamp=$(stat -c '%Y:%s' "$bin" 2>/dev/null) || stamp=unknown
+  cache="$STATE_DIR/lpac-mbim"
+
+  if [[ -s $cache && $(sed -n 1p "$cache" 2>/dev/null) == "$stamp" ]]; then
+    [[ $(sed -n 2p "$cache" 2>/dev/null) == yes ]] && printf 'mbim' || printf 'none'
+    return 0
+  fi
+
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  if lpac_has_driver mbim; then
+    printf '%s\nyes\n' "$stamp" >"$cache" 2>/dev/null
+    printf 'mbim'
+  else
+    printf '%s\nno\n' "$stamp" >"$cache" 2>/dev/null
+    printf 'none'
+  fi
+}
+
 
 # ------------------------------------------------------------- eSIM profiles
-# An eUICC stores several profiles and enables one at a time. lpac speaks
-# SGP.22 to it over the AT port, which ModemManager holds, so every operation
-# is stop-MM / act / start-MM under a single pkexec -- and drops the connection
-# for its duration. Nothing here runs unless the user asked for it.
+# An eUICC holds several profiles and enables one at a time. lpac speaks
+# SGP.22 to it and the APDUs travel over MBIM, the port ModemManager is
+# already using, so nothing is stopped and the connection stays up.
+#
+# pkexec is auth_admin and caches nothing, so every elevation is its own
+# prompt. Everything privileged an eSIM operation needs therefore happens in
+# ONE call: the slot switch, the wait for the card, the lpac command, and the
+# list that follows it.
 
-# Runs one lpac command with the port to itself. Prints lpac's JSON on stdout.
-lpac_run() {
-  local port
-  port=$(at_port) || {
-    echo "This modem exposes no AT port, which lpac needs." >&2
-    return 1
-  }
+# What the privileged half exits with, so the caller can say which step failed.
+ESIM_E_NOMODEM=11
+ESIM_E_SLOT=12
+ESIM_E_READY=13
+ESIM_E_LPAC=14
 
-  # lpac needs the AT port, so ModemManager is stopped for the read and
-  # NetworkManager tears the connection down with it. Note whether it was up.
-  local was_active=""
-  nm_is_active && was_active=1
+# Runs one lpac command against the eUICC under a single authorization.
+#   $1  SIM slot to make active first, or "" to use whichever is active
+#   $2  1 to append the refreshed profile list, 0 for the command alone
+#   $@  the lpac command
+# Sets ESIM_JSON, and ESIM_LIST_JSON when the list was asked for. Returns 0
+# whenever lpac answered at all, including a refusal: the reason is in the
+# JSON and every caller reads payload.code.
+esim_run() {
+  local want=$1 withlist=$2
+  shift 2
+  ESIM_JSON="" ESIM_LIST_JSON=""
 
-  # Serialize: two of these overlapping means one stops ModemManager while the
-  # other is starting it, and lpac gets a port that is about to be reclaimed.
-  # flock also makes the panel's repeated Refresh clicks safe.
+  # With no lpac command this is a slot switch and nothing more, so none of
+  # the eUICC machinery has to be present for it to work.
+  local dev=""
+  if (($#)); then
+    need_jq || return 1
+    have_lpa || {
+      echo "eSIM profiles need lpac, which is not installed." >&2
+      echo "$LPA_HINT" >&2
+      return 1
+    }
+    dev=$(mbim_port) && dev_node_ok "$dev" || {
+      echo "This modem exposes no MBIM port, which eSIM management needs." >&2
+      return 1
+    }
+    lpac_has_driver mbim || {
+      echo "This lpac has no mbim driver, so it cannot reach the eUICC." >&2
+      echo "$LPA_HINT" >&2
+      return 1
+    }
+  else
+    dev=$(mbim_port 2>/dev/null) || dev=""
+    [[ -n $dev ]] && { dev_node_ok "$dev" || dev=""; }
+  fi
+
+  # Two of these overlapping would have one switching the slot while the other
+  # is mid-APDU. flock also makes repeated panel clicks safe.
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  local lock
   exec {lock}>"$STATE_DIR/lpac.lock" 2>/dev/null || true
   flock -w 90 "$lock" 2>/dev/null || true
 
-  # `systemctl stop` returning does not mean ModemManager has let the port go.
-  # Wait for it, then hand it back and let MM settle; the caller needs a modem.
-  local out
+  local out rc
   out=$(pkexec sh -c '
-    port=$1
-    systemctl stop ModemManager
-    for _ in $(seq 1 40); do
-      exec 9<>"$port" 2>/dev/null && { exec 9>&-; break; }
-      sleep 0.25
-    done
-    # euicc_init opens a logical channel to the ISD-R applet and fails
-    # intermittently for a few seconds after ModemManager releases the port.
-    # Retry inside the one authorization; a genuine failure fails every time.
-    for attempt in 1 2 3 4; do
-      result=$(LPAC_APDU=at LPAC_APDU_AT_DEVICE=$port lpac ${@:2})
-      case $result in
-      *euicc_init*) sleep 1 ;;
-      *) break ;;
-      esac
-    done
-    printf "%s" "$result"
-    systemctl start ModemManager
-  ' sh "$port" "$@")
+    dev=$1 want=$2 withlist=$3
+    shift 3
+
+    modem_idx() {
+      mmcli -L 2>/dev/null | sed -n "s|.*/Modem/\([0-9]\{1,\}\).*|\1|p" | head -1
+    }
+    slot_now() {
+      mmcli -m "$1" -K 2>/dev/null |
+        sed -n "s/^[[:space:]]*modem\.generic\.primary-sim-slot[[:space:]]*:[[:space:]]*//p" |
+        head -1
+    }
+
+    idx=$(modem_idx)
+    [ -n "$idx" ] || exit 11
+
+    if [ -n "$want" ] && [ "$(slot_now "$idx")" != "$want" ]; then
+      mmcli -m "$idx" --set-primary-sim-slot="$want" >/dev/null 2>&1 || exit 12
+      # The switch re-enumerates the modem, so the index changes and the SIM
+      # object arrives late. Wait for the modem, then for the slot to read
+      # back, then for the card: MBIM answers before the card is usable.
+      ok=""
+      i=0
+      while [ "$i" -lt 60 ]; do
+        idx=$(modem_idx)
+        if [ -n "$idx" ] && [ "$(slot_now "$idx")" = "$want" ]; then
+          # MBIM answers before the card is usable, so ask the card itself
+          # when there is a port to ask. Without one the slot read-back and a
+          # SIM object are all ModemManager offers.
+          if [ -z "$dev" ]; then
+            sim=$(mmcli -m "$idx" -K 2>/dev/null |
+              sed -n "s/^[[:space:]]*modem\.generic\.sim[[:space:]]*:[[:space:]]*//p" | head -1)
+            case $sim in */SIM/*) ok=1; break ;; esac
+          elif mbimcli --device="$dev" --device-open-proxy \
+            --query-subscriber-ready-status >/dev/null 2>&1; then
+            ok=1
+            break
+          fi
+        fi
+        sleep 0.5
+        i=$((i + 1))
+      done
+      [ -n "$ok" ] || exit 13
+    fi
+
+    [ -n "$want" ] || want=$(slot_now "$(modem_idx)")
+    [ -n "$want" ] || want=1
+
+    [ "$#" -gt 0 ] || exit 0
+
+    export LPAC_APDU=mbim LPAC_APDU_MBIM_DEVICE="$dev" \
+      LPAC_APDU_MBIM_UIM_SLOT="$want" LPAC_APDU_MBIM_USE_PROXY=1
+
+    lpac "$@" || exit 14
+    if [ "$withlist" = 1 ]; then
+      printf "\n%s\n" "===LPAC-LIST==="
+      lpac profile list
+    fi
+  ' sh "$dev" "$want" "$withlist" "$@")
+  rc=$?
 
   flock -u "$lock" 2>/dev/null || true
   exec {lock}>&- 2>/dev/null || true
 
-  # With autoconnect off nothing brings the connection back. Restore it in the
-  # background: nm_up waits up to 45s and the caller wants its list now.
-  # Redirected so the background job does not hold the caller's stdout open.
-  (
-    for _ in $(seq 1 20); do
-      [[ -n $(nm_device) ]] && break
-      sleep 0.5
-    done
-    # Seizing the AT port repeatedly can leave the radio dead while the modem
-    # still enumerates. Runs whether or not the connection was up; the damage
-    # is to the modem.
-    cache_flush
-    idx=$(modem_index_wait 30) && ensure_radio "$idx" >/dev/null
-    [[ -n $was_active ]] && { nm_is_active || nm_up; }
-    # The parent's EXIT trap has already taken the cache dir; this subshell
-    # recreated it behind the trap.
-    rm -rf "$CACHE_DIR"
-  ) >/dev/null 2>&1 &
+  ESIM_JSON=$(sed "/^===LPAC-LIST===\$/,\$d" <<<"$out")
+  ESIM_LIST_JSON=$(sed -n "/^===LPAC-LIST===\$/,\$p" <<<"$out" | tail -n +2)
 
+  case $rc in
+  "$ESIM_E_NOMODEM")
+    echo "ModemManager reports no modem." >&2
+    return 1
+    ;;
+  "$ESIM_E_SLOT")
+    echo "The modem refused to make SIM slot $want active." >&2
+    return 1
+    ;;
+  "$ESIM_E_READY")
+    echo "SIM slot $want did not become ready in thirty seconds." >&2
+    return 1
+    ;;
+  esac
 
+  (($#)) || return 0
 
-  [[ -n $out ]] || {
-    echo "lpac produced no output (exit path above)." >&2
+  [[ -n $ESIM_JSON ]] || {
+    echo "lpac produced no output." >&2
     return 1
   }
-  printf '%s\n' "$out"
+  return 0
 }
 
 # Guard shared by every profile command.
@@ -1517,45 +1671,37 @@ profile_precheck() {
     return 1
   }
 
-  # Every lpac run restarts ModemManager on its way out, and the modem takes
-  # twenty seconds or more to re-enumerate. Without this wait the next run
-  # finds no modem.
-  local i
-  for ((i = 0; i < 60; i++)); do
-    systemctl is-active --quiet ModemManager && break
-    sleep 0.5
-  done
-
-  local idx slot
-  idx=$(modem_index_wait 45) || {
-    echo "The modem has not come back yet after the last eSIM operation." >&2
-    echo "Give it a few seconds and try again." >&2
+  local idx want cur
+  idx=$(modem_index_wait 30) || {
+    echo "ModemManager reports no modem." >&2
     return 1
   }
-  slot=$(kv "$(modem_dump "$idx")" modem.generic.primary-sim-slot)
-  [[ $slot == 2 ]] || {
-    echo "Profiles live on the eUICC, which is not the active slot." >&2
-    echo "Switch to it first:  omarchy-cellular sim 2 --force" >&2
+
+  # The eUICC only answers while it is the selected card, and switching cards
+  # drops the connection -- not something to do behind a Refresh click.
+  want=$(esim_slot) || {
+    echo "No slot on this modem reports an eUICC." >&2
+    return 1
+  }
+  cur=$(kv "$(modem_dump "$idx")" modem.generic.primary-sim-slot)
+  [[ $cur == "$want" ]] || {
+    echo "The eSIM is not the selected SIM, so its profiles cannot be read." >&2
+    echo "Select it first:  omarchy-cellular sim esim" >&2
     return 1
   }
 }
 
 # key=value lines the panel can read, one profile per line prefixed profile.N.
 cmd_profile_list() {
-  # No precheck: lpac drives the AT port directly and needs neither
-  # ModemManager nor a modem object. A wrong slot fails fast in lpac.
-  need_jq || return 1
-  have_lpa || {
-    echo "eSIM profiles need a Local Profile Assistant, which is not installed." >&2
-    echo "$LPA_HINT" >&2
-    return 1
-  }
-  local json
-  json=$(lpac_run profile list) || return 1
+  profile_precheck || return 1
+  esim_run "" 0 profile list || return 1
+  profiles_render "$ESIM_JSON"
+}
 
-  # One field per line is the panel's protocol, and the card supplies these
-  # names. A newline inside one emits extra profile.N.field= lines that the
-  # panel reads as real, so control characters are folded to spaces here.
+# One field per line is the panel's protocol, and the card supplies these
+# names. A newline inside one emits extra profile.N.field= lines that the
+# panel reads as real, so control characters are folded to spaces here.
+profiles_render() {
   jq -r '
     def flat: tostring | gsub("[[:cntrl:]]"; " ");
     (.payload.data // [])
@@ -1565,7 +1711,24 @@ cmd_profile_list() {
     + "profile.\(.key).provider=\((.value.serviceProviderName // "") | flat)\n"
     + "profile.\(.key).state=\((.value.profileState // "") | flat)\n"
     + "profile.\(.key).class=\((.value.profileClass // "") | flat)"
-  ' <<<"$json" 2>/dev/null
+  ' <<<"$1" 2>/dev/null
+}
+
+# Runs a mutating profile command and the list that follows it inside ONE
+# privileged call. pkexec is auth_admin with no caching, so a change and the
+# refreshed list would otherwise be two prompts; over AT it would also be two
+# ModemManager stop/start cycles. Sets LPAC_ACTION_JSON and LPAC_LIST_JSON.
+lpac_action() {
+  esim_run "" 1 "$@" || return 1
+  LPAC_ACTION_JSON=$ESIM_JSON
+  LPAC_LIST_JSON=$ESIM_LIST_JSON
+}
+
+# The refreshed list, but only for the panel: a person running this in a
+# terminal wants the sentence, not the machine feed.
+emit_profiles_if_quiet() {
+  [[ ${OMARCHY_CELLULAR_QUIET:-0} == 1 && -n ${LPAC_LIST_JSON:-} ]] || return 0
+  profiles_render "$LPAC_LIST_JSON"
 }
 
 # Carriers hand out a QR code, not the string inside it. Select the region it is
@@ -1630,9 +1793,11 @@ cmd_profile() {
       return 2
     }
     profile_precheck || return 1
-    if lpac_run profile "$action" "$arg" | jq -e '.payload.code == 0' >/dev/null 2>&1; then
+    if lpac_action profile "$action" "$arg" &&
+      jq -e '.payload.code == 0' <<<"$LPAC_ACTION_JSON" >/dev/null 2>&1; then
       echo "Profile $arg ${action}d."
       notify "eSIM profile ${action}d"
+      emit_profiles_if_quiet
       [[ $action == enable ]] && nm_apply
     else
       echo "Could not $action profile $arg." >&2
@@ -1646,8 +1811,14 @@ cmd_profile() {
       return 2
     }
     profile_precheck || return 1
-    lpac_run profile nickname "$arg" "$arg2" | jq -e '.payload.code == 0' >/dev/null 2>&1 &&
-      echo "Renamed to $arg2." || { echo "Rename failed." >&2; return 1; }
+    if lpac_action profile nickname "$arg" "$arg2" &&
+      jq -e '.payload.code == 0' <<<"$LPAC_ACTION_JSON" >/dev/null 2>&1; then
+      echo "Renamed to $arg2."
+      emit_profiles_if_quiet
+    else
+      echo "Rename failed." >&2
+      return 1
+    fi
     ;;
   scan)
     # Scan and install in one step; the code is never shown or stored.
@@ -1667,9 +1838,11 @@ cmd_profile() {
     profile_precheck || return 1
     echo "Downloading (this takes up to a minute and drops cellular)…"
     local out why
-    out=$(lpac_run profile download -a "$arg") || out=""
+    lpac_action profile download -a "$arg" || true
+    out=${LPAC_ACTION_JSON:-}
     if jq -e '.payload.code == 0' <<<"$out" >/dev/null 2>&1; then
       echo "Profile downloaded. Enable it with: omarchy-cellular profile enable <iccid>"
+      emit_profiles_if_quiet
     else
       # lpac says which step failed: an unreachable SM-DP+, a used or expired
       # code and a wrong one all land here and want different answers.
@@ -1707,10 +1880,25 @@ cmd_sim() {
   # Bare `sim` prints the configured slot — the menu's ✓ marks read this, so
   # it must stay cheap (no mmcli round-trip).
   "") get_cfg SIM_SLOT; return 0 ;;
-  1 | physical) slot=1 ;;
-  2 | esim) slot=2 ;;
+  # A number is taken as given; the words are resolved against the modem,
+  # because which slot holds the eUICC is a property of the hardware.
+  [1-9]) ;;
+  esim)
+    slot=$(esim_slot) || {
+      echo "No slot on this modem reports an eUICC." >&2
+      echo "Name the slot directly if you know it:  omarchy-cellular sim <n>" >&2
+      return 1
+    }
+    ;;
+  physical)
+    if slot=$(esim_slot); then
+      [[ $slot == 1 ]] && slot=2 || slot=1
+    else
+      slot=1
+    fi
+    ;;
   *)
-    echo "usage: omarchy-cellular sim [1|2]   (1 = physical card, 2 = eSIM)" >&2
+    echo "usage: omarchy-cellular sim [<n>|physical|esim]" >&2
     return 2
     ;;
   esac
@@ -1738,7 +1926,7 @@ cmd_sim() {
         if have_lpa; then
           echo "Install one with lpac, then switch back." >&2
           echo "An LPA has to talk to the eUICC while it is the active slot:" >&2
-          echo "    omarchy-cellular sim 2 --force" >&2
+          echo "    omarchy-cellular sim esim --force" >&2
           notify "eSIM has no profile installed. Not switching."
         else
           echo >&2
@@ -1758,10 +1946,12 @@ cmd_sim() {
 
   # SetPrimarySimSlot is not on ModemManager's D-Bus whitelist, so it is
   # root-only whatever polkit says: the bus rejects the message before polkit
-  # is consulted.
+  # is consulted. The switch goes through the same privileged session the eSIM
+  # commands use, so it waits for the card the same way and says which step
+  # failed rather than reporting a bare non-zero.
   if [[ -n $idx ]]; then
     echo "Switching to SIM slot $slot (this reconnects the modem)…"
-    if pkexec mmcli -m "$idx" --set-primary-sim-slot="$slot" >/dev/null 2>&1 &&
+    if esim_run "$slot" 0 &&
       nm_apply && { ! nm_is_active || nm_up; }; then
       read_state
       notify "SIM slot $slot active — ${OPERATOR:-connected}"
@@ -2073,6 +2263,12 @@ cmd_doctor() {
   # jq is not optional: every lpac result is parsed through it.
   check "jq" "$(have jq)"
   note "lpac — eSIM profiles" "$(have lpac)"
+  # Which transport eSIM operations get is the difference between a profile
+  # list that costs nothing and one that drops the connection for half a minute.
+  case "$(esim_transport)" in
+  mbim) note "eSIM transport — connection stays up" "mbim" ;;
+  *) note "eSIM transport — needs lpac with the mbim driver" "--" ;;
+  esac
   note "zbarimg — QR scan" "$(have zbarimg)"
   note "grim/slurp — QR scan" \
     "$(command -v grim >/dev/null && command -v slurp >/dev/null && echo ok || echo '--')"
@@ -2238,7 +2434,7 @@ usage: omarchy-cellular <command>
   at '<command>'       send a raw AT command (diagnostics)
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
-  sim [1|2] [--force] select physical SIM (1) or eSIM (2); bare: show config
+  sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
   profile ...         eSIM profiles: list, enable, delete, nickname, download, scan
   carrier ...         pick country/carrier and apply its APN (see: carrier)
   limit ...           monthly/daily data cap with auto-cutoff (see: limit)

@@ -186,6 +186,14 @@ Panel {
   readonly property real usedBytes: parseFloat(info.used_bytes || "0")
   readonly property real limitBytes: parseFloat(info.limit_bytes || "0")
   readonly property bool limitAck: info.limit_ack === "1"
+
+  // Which slot carries the eUICC is the CLI's finding, not an assumption: it
+  // is the slot whose SIM reports an EID. The other one is the physical card.
+  readonly property string esimSlot: info.esim_slot || "2"
+  readonly property bool hasEsim: (info.esim_slot || "") !== ""
+  readonly property bool esimSelected: info.slot === esimSlot
+  readonly property string physicalSlot: esimSlot === "1" ? "2" : "1"
+  function slotHasCard(slot) { return info["slot" + slot + "_sim"] !== "no" }
   readonly property real usedFraction: limitBytes > 0 ? Math.min(1, usedBytes / limitBytes) : 0
   readonly property string nextResetLabel: {
     if (!info.next_reset) return ""
@@ -205,7 +213,7 @@ Panel {
     // Prefer the network's stated reason; a modem that is genuinely still
     // looking reports none.
     case "searching": return info.reason ? capitalise(info.reason) : "Searching for network"
-    case "nosim": return info.active_slot === "2"
+    case "nosim": return info.active_slot === root.esimSlot
       ? "eSIM is empty — no profile"
       : "SIM slot " + (info.active_slot || "?") + " is empty"
     case "locked": return "SIM locked — PIN required"
@@ -381,6 +389,7 @@ Panel {
 
   Process {
     id: actionProc
+    stdout: StdioCollector { id: actionOut; waitForEnd: true }
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function (code) {
       root.busyLabel = ""
@@ -389,6 +398,15 @@ Panel {
       if (code !== 0 && root.profilesUndo.length > 0) {
         root.profiles = root.profilesUndo
         root.profileError = (actionErr.text || "").trim() || "That did not work."
+      } else if (code === 0) {
+        // A profile command returns the refreshed list from inside the same
+        // authorization. When it does, it replaces the optimistic guess and
+        // no second prompt is needed.
+        var fresh = root.parseProfiles(actionOut.text || "")
+        if (fresh.length > 0) {
+          root.profiles = fresh
+          root.profilesStale = false
+        }
       }
       root.profilesUndo = []
       root.opened ? root.refreshDetails() : root.refresh()
@@ -1257,7 +1275,7 @@ Panel {
             spacing: Style.space(6)
             // Three cells only when the eSIM is selected, and not equal thirds:
             // "eSIM Profiles" is twice the label the slots carry.
-            readonly property int cells: root.info.slot === "2" ? 3 : 2
+            readonly property int cells: root.hasEsim ? 3 : 2
             readonly property real usable: width - spacing * (cells - 1)
             readonly property real cellWidth: cells === 3 ? usable * 0.28 : usable / 2
             readonly property real wideWidth: usable - cellWidth * 2
@@ -1271,14 +1289,15 @@ Panel {
               verticalPadding: Style.space(2)
               iconSize: Style.font.bodySmall
               iconText: "󰒧"
-              text: root.info.slot1_sim === "no" ? "Physical · empty" : "Physical"
-              tooltipText: root.info.slot1_sim === "no" ? "No card in the slot" : ""
-              opacity: root.info.slot1_sim === "no" ? 0.55 : 1
+              text: root.slotHasCard(root.physicalSlot) ? "Physical" : "Physical · empty"
+              tooltipText: root.slotHasCard(root.physicalSlot) ? "" : "No card in the slot"
+              opacity: root.slotHasCard(root.physicalSlot) ? 1 : 0.55
               bordered: true
-              active: root.info.slot === "1"
+              active: root.info.slot === root.physicalSlot
               foreground: root.barForeground
               fontFamily: root.fontFamily
-              onClicked: if (root.info.slot !== "1") root.runAction([root.cli, "sim", "1"])
+              onClicked: if (root.info.slot !== root.physicalSlot)
+                           root.runAction([root.cli, "sim", root.physicalSlot])
             }
 
             Button {
@@ -1287,27 +1306,36 @@ Panel {
               verticalPadding: Style.space(2)
               iconSize: Style.font.bodySmall
               iconText: "󱤓"
-              text: root.info.slot2_sim === "no" ? "eSIM · empty" : "eSIM"
-              tooltipText: root.info.slot2_sim === "no" ? "No profile installed on the eSIM" : ""
-              opacity: root.info.slot2_sim === "no" ? 0.55 : 1
+              text: root.slotHasCard(root.esimSlot) ? "eSIM" : "eSIM · empty"
+              tooltipText: root.slotHasCard(root.esimSlot) ? "" : "No profile installed on the eSIM"
+              opacity: root.slotHasCard(root.esimSlot) ? 1 : 0.55
               bordered: true
-              active: root.info.slot === "2"
+              active: root.info.slot === root.esimSlot
               foreground: root.barForeground
               fontFamily: root.fontFamily
-              onClicked: if (root.info.slot !== "2") root.runAction([root.cli, "sim", "2"])
+              onClicked: if (root.info.slot !== root.esimSlot)
+                           root.runAction([root.cli, "sim", root.esimSlot])
             }
 
-            // The lock glyph says the click costs a prompt. It also costs the
-            // connection: lpac needs the AT port, so ModemManager is stopped.
+            // The lock glyph says the click costs an authorization prompt.
+            // Present whenever the modem has an eUICC, but only usable while
+            // that eUICC is the selected card: it cannot answer otherwise, and
+            // selecting it drops the connection, which is the user's call.
             Button {
-              visible: root.info.slot === "2"
+              visible: root.hasEsim
+              enabled: root.esimSelected
+              opacity: root.esimSelected ? 1 : 0.5
               width: simRow.wideWidth
               fontSize: Style.font.caption
               verticalPadding: Style.space(2)
               iconSize: Style.font.bodySmall
               iconText: "󰌾"
               text: "eSIM Profiles"
-              tooltipText: "Stops the modem briefly to read the eSIM"
+              tooltipText: !root.esimSelected
+                           ? "Select the eSIM first to manage its profiles"
+                           : root.info.esim_transport === "mbim"
+                             ? "Reads the eSIM over MBIM; data keeps running"
+                             : "Needs lpac built with the mbim driver"
               bordered: true
               active: root.esimExpanded
               foreground: root.barForeground
@@ -1338,8 +1366,7 @@ Panel {
                 visible: root.profilesLoading
                 width: parent.width
                 wrapMode: Text.WordWrap
-                // Says why the connection just dropped, at the moment it does.
-                text: "Reading the eSIM, briefly dropping data…"
+                text: "Reading the eSIM…"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1559,7 +1586,7 @@ Panel {
                     if (text.trim() !== "") {
                       if (!root.runAction([root.cli, "profile", "download", text.trim()]))
                         return
-                      root.profileError = "Downloaded. Refresh to see it."
+                      root.profileError = "Downloaded."
                     }
                     root.addingProfile = false
                     text = ""
