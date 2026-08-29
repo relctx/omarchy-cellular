@@ -405,7 +405,12 @@ modem_index() {
   local f="$CACHE_DIR/index"
   [[ -s $f ]] || {
     mkdir -p "$CACHE_DIR"
-    mmcli -L -K 2>/dev/null | sed -n 's|.*/Modem/\([0-9]\+\).*|\1|p' | head -1 >"$f"
+    # busctl, not mmcli: listing modems through libmm-glib dereferences an
+    # object that has no Modem interface while one is being rebuilt, and takes
+    # SIGSEGV for it. This runs on every poll, so that is a coredump per poll
+    # for as long as the modem is re-initialising.
+    busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
+      sed -n 's|.*/Modem/\([0-9]\{1,\}\)$|\1|p' | head -1 >"$f"
   }
   cat "$f" 2>/dev/null
 }
@@ -1662,14 +1667,24 @@ esim_run() {
   return 0
 }
 
-# The ICCID ModemManager currently believes is on the card.
+# The ICCID ModemManager currently believes is on the card, read straight off
+# the bus. Deliberately not mmcli: this is polled while the modem is being
+# rebuilt, which is exactly when libmm-glib dereferences a modem object that
+# has no Modem interface yet and mmcli takes SIGSEGV. busctl returns an error.
 sim_iccid_now() {
-  local idx sp
-  cache_flush
-  idx=$(modem_index) || return 1
-  sp=$(kv "$(modem_dump "$idx")" modem.generic.sim | sed 's|.*/SIM/||')
-  [[ -n $sp ]] || return 1
-  kv "$(mmcli -i "$sp" -K 2>/dev/null)" sim.properties.iccid
+  local mpath spath
+  mpath=$(busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
+    grep -m1 -E '/Modem/[0-9]+$') || return 1
+  [[ -n $mpath ]] || return 1
+
+  spath=$(busctl get-property org.freedesktop.ModemManager1 "$mpath" \
+    org.freedesktop.ModemManager1.Modem Sim 2>/dev/null |
+    sed -n 's/^o "\(.*\)"$/\1/p')
+  [[ -n $spath && $spath != / ]] || return 1
+
+  busctl get-property org.freedesktop.ModemManager1 "$spath" \
+    org.freedesktop.ModemManager1.Sim SimIdentifier 2>/dev/null |
+    sed -n 's/^s "\(.*\)"$/\1/p'
 }
 
 # ES10c EnableProfile carries a refresh flag, and with it set the eUICC issues
