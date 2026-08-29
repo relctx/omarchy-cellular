@@ -961,6 +961,137 @@ read_details() {
 
 # `mode` with no argument prints the current allowed set; with arguments it sets
 # them. "auto" means every mode the modem supports, preferring the fastest.
+# SIM lock state and the operations that clear it. ModemManager exposes these
+# on the SIM object and the bus policy allows them, so none of this needs a
+# privilege or a prompt. PIN= in cellular.conf is what unlocks the card
+# unattended at connect time; this is for the card in front of you.
+#
+# Attempts are limited, so the count left is printed before anything is sent.
+sim_lock_name() {
+  case $1 in
+  1) printf 'none' ;;
+  2) printf 'SIM PIN' ;;
+  3) printf 'SIM PIN2' ;;
+  4) printf 'SIM PUK' ;;
+  5) printf 'SIM PUK2' ;;
+  0) printf 'unknown' ;;
+  *) printf 'lock type %s' "$1" ;;
+  esac
+}
+
+# busctl prints a{uu} as a count then flat key/value pairs. Name the locks.
+sim_retries_text() {
+  local raw=${1#a\{uu\} } out="" n k v i
+  read -r n rest <<<"$raw" || return 0
+  [[ $n =~ ^[0-9]+$ ]] || return 0
+  set -- $rest
+  for ((i = 0; i < n; i++)); do
+    k=$1 v=$2
+    shift 2 2>/dev/null || break
+    out+="${out:+, }$(sim_lock_name "$k"): $v"
+  done
+  printf '%s' "$out"
+}
+
+sim_dbus_path() {
+  local idx
+  idx=$(modem_index) || return 1
+  busctl get-property org.freedesktop.ModemManager1 \
+    "/org/freedesktop/ModemManager1/Modem/$idx" \
+    org.freedesktop.ModemManager1.Modem Sim 2>/dev/null |
+    sed -n 's/^o "\(.*\)"$/\1/p'
+}
+
+cmd_pin() {
+  local action="${1:-}" idx spath required retries
+  idx=$(modem_index_wait) || {
+    echo "No modem detected." >&2
+    return 1
+  }
+  spath=$(sim_dbus_path) || spath=""
+  [[ -n $spath && $spath != / ]] || {
+    echo "No SIM is active." >&2
+    return 1
+  }
+
+  required=$(busctl get-property org.freedesktop.ModemManager1 \
+    "/org/freedesktop/ModemManager1/Modem/$idx" \
+    org.freedesktop.ModemManager1.Modem UnlockRequired 2>/dev/null | awk '{print $2}')
+  retries=$(busctl get-property org.freedesktop.ModemManager1 \
+    "/org/freedesktop/ModemManager1/Modem/$idx" \
+    org.freedesktop.ModemManager1.Modem UnlockRetries 2>/dev/null)
+
+  local call
+  call() {
+    local method=$1
+    shift
+    busctl call org.freedesktop.ModemManager1 "$spath" \
+      org.freedesktop.ModemManager1.Sim "$@" 2>&1
+  }
+
+  case "$action" in
+  "" | status)
+    echo "Lock:    $(sim_lock_name "${required:-0}")"
+    local r
+    r=$(sim_retries_text "$retries")
+    [[ -n $r ]] && echo "Retries: $r"
+    case ${required:-0} in
+    1) echo "The card is unlocked." ;;
+    3 | 5) echo "PIN2 gates fixed dialling and cost counters, not data." ;;
+    esac
+    return 0
+    ;;
+  puk)
+    [[ -n ${2:-} && -n ${3:-} ]] || {
+      echo "usage: omarchy-cellular pin puk <puk> <new-pin>" >&2
+      return 2
+    }
+    echo "Retries left: $(sim_retries_text "$retries")"
+    busctl call org.freedesktop.ModemManager1 "$spath" \
+      org.freedesktop.ModemManager1.Sim SendPuk ss "$2" "$3" >/dev/null 2>&1 || {
+      echo "The PUK was refused. Check the count above before trying again." >&2
+      return 1
+    }
+    echo "Card unblocked and the PIN set."
+    ;;
+  on | off)
+    [[ -n ${2:-} ]] || {
+      echo "usage: omarchy-cellular pin $action <pin>" >&2
+      return 2
+    }
+    busctl call org.freedesktop.ModemManager1 "$spath" \
+      org.freedesktop.ModemManager1.Sim EnablePin sb "$2" \
+      "$([[ $action == on ]] && echo true || echo false)" >/dev/null 2>&1 || {
+      echo "The PIN was refused." >&2
+      return 1
+    }
+    echo "The card will $([[ $action == on ]] && echo "ask for a PIN" || echo "no longer ask for a PIN") at power-on."
+    ;;
+  change)
+    [[ -n ${2:-} && -n ${3:-} ]] || {
+      echo "usage: omarchy-cellular pin change <old-pin> <new-pin>" >&2
+      return 2
+    }
+    busctl call org.freedesktop.ModemManager1 "$spath" \
+      org.freedesktop.ModemManager1.Sim ChangePin ss "$2" "$3" >/dev/null 2>&1 || {
+      echo "The old PIN was refused." >&2
+      return 1
+    }
+    echo "PIN changed. Update PIN= in cellular.conf if it is stored there."
+    ;;
+  *)
+    # A bare argument is the PIN itself, which is the common case.
+    echo "Retries left: $(sim_retries_text "$retries")"
+    busctl call org.freedesktop.ModemManager1 "$spath" \
+      org.freedesktop.ModemManager1.Sim SendPin s "$action" >/dev/null 2>&1 || {
+      echo "The PIN was refused. Check the count above before trying again." >&2
+      return 1
+    }
+    echo "Card unlocked. Store it in cellular.conf (PIN=) to unlock at connect."
+    ;;
+  esac
+}
+
 # The modem's AT port, found by function: the kernel labels wwan ports in
 # /sys/class/wwan, and older USB modems predating that subsystem expose tty
 # nodes only ModemManager can identify.
@@ -1002,18 +1133,6 @@ at_port() {
 #   AT+CFUN?                radio power state
 #   AT+QNWINFO              band and channel (Quectel)
 #   AT+QENG="servingcell"   serving cell detail (Quectel)
-#
-# SIM PIN. ModemManager does all of this over D-Bus without taking the port,
-# and PIN= in cellular.conf is handed to NetworkManager, so reach for these
-# only when the supported route has failed. Three wrong PINs lock the card
-# until it is given the PUK, and a wrong PUK can destroy it outright:
-#   AT+CPIN?                lock state: READY, SIM PIN, SIM PUK
-#   AT+CPIN="1234"          enter the PIN for this power cycle
-#   AT+CLCK="SC",2          whether the PIN is demanded at power-on
-#   AT+CLCK="SC",1,"1234"   demand it at power-on
-#   AT+CLCK="SC",0,"1234"   stop demanding it
-#   AT+CPWD="SC","old","new"  change it
-#   AT+CPIN="puk","newpin"  unblock a locked card with the PUK
 cmd_at() {
   local idx dump port
   [[ -n ${1:-} ]] || {
@@ -2651,6 +2770,7 @@ prefer)
 sim) cmd_sim "${2:-}" "${3:-}" ;;
 profile) cmd_profile "${2:-}" "${3:-}" "${4:-}" ;;
 at) cmd_at "${2:-}" ;;
+pin) cmd_pin "${2:-}" "${3:-}" "${4:-}" ;;
 esim-session) cmd_esim_session ;;
 mode) cmd_mode "${2:-}" ;;
 identify) cmd_identify ;;
@@ -2697,6 +2817,7 @@ usage: omarchy-cellular <command>
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
+  pin ...             SIM lock: status, unlock, puk, on|off, change
   at '<command>'      send one AT command, print the reply (diagnostics)
   profile ...         eSIM profiles: list, enable, delete, nickname, download, scan
   esim-session        one authorization, then profile commands on stdin (the panel)
