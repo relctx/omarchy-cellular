@@ -539,16 +539,22 @@ read_state() {
 #   U+F08BC md-signal_cellular_1         1/3
 #   U+F08BD md-signal_cellular_2         2/3
 #   U+F08BE md-signal_cellular_3         full
+# Three silhouettes, because a dimmed copy of the same glyph is invisible in
+# most themes: filled bars carry data, the hollow outline is on-network with
+# no data, and the slash is off -- disabled, no SIM, no modem, locked.
 signal_icon() {
   case $STATE in
-  absent | disabled | locked | searching | nosim) printf '\U000F08BF' ;;
-  *)
+  absent | disabled | locked | nosim) printf '\U000F0783' ;;
+  searching) printf '\U000F08BF' ;;
+  connected)
+    # Never the outline while data flows: a weak cell reads 0% often, and
+    # the outline is the disconnected shape.
     if ((SIGNAL >= 67)); then printf '\U000F08BE'
     elif ((SIGNAL >= 34)); then printf '\U000F08BD'
-    elif ((SIGNAL > 0)); then printf '\U000F08BC'
-    else printf '\U000F08BF'
+    else printf '\U000F08BC'
     fi
     ;;
+  *) printf '\U000F08BF' ;;
   esac
 }
 
