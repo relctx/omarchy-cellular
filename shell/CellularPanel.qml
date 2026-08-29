@@ -282,6 +282,7 @@ Panel {
   // What the panel is doing right now; the hero otherwise shows the last polled
   // state, which during a connect reads as if nothing happened.
   property string busyLabel: ""
+  property string busyVerb: ""
   function maskId(v) {
     if (!v) return "—"
     return detailsRevealed ? v : v.slice(0, 4) + "•".repeat(Math.max(0, v.length - 4))
@@ -486,6 +487,7 @@ Panel {
   function runAction(cmd) {
     if (actionProc.running) return false
     root.busyLabel = root.labelFor(cmd)
+    root.busyVerb = cmd[1] === "sh" ? "" : (cmd[1] || "")
     actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
     actionProc.running = true
     return true
@@ -546,6 +548,7 @@ Panel {
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function (code) {
       root.busyLabel = ""
+      root.busyVerb = ""
       // The list is updated before the command runs, so a failure has to put
       // it back or the change appears to take and then revert.
       if (code !== 0 && root.profilesUndo.length > 0) {
@@ -614,6 +617,20 @@ Panel {
   function busEvent(line) {
     // Non-signal chatter: the two header lines, name-owner notices.
     if (line.length === 0 || line[0] !== "/") return
+
+    // A SIM switch takes the better part of a minute, almost all of it the
+    // modem's own re-enumeration. The stages pass through here anyway;
+    // narrate them instead of holding one label over the whole wait.
+    if ((busyVerb === "sim" || busyVerb === "use") && line.indexOf("/Modem") !== -1) {
+      if (line.indexOf("InterfacesRemoved") !== -1)
+        busyLabel = "Switching SIM — modem restarting…"
+      else if (line.indexOf("InterfacesAdded") !== -1)
+        busyLabel = "Switching SIM — modem initialising…"
+      else if (line.indexOf("{'State': <8>}") !== -1)
+        busyLabel = "Switching SIM — registered, connecting…"
+      else if (line.indexOf("{'State': <11>}") !== -1)
+        busyLabel = "Switching SIM — connected"
+    }
     // Signal-strength samples arrive every few seconds while polling is
     // armed. They only matter when the panel is open; refreshing the bar
     // for each would out-poll the polling this feed replaces.
@@ -845,11 +862,96 @@ Panel {
         // ---------- Active identity ----------
         PanelSeparator { foreground: root.barForeground }
 
-        Column {
+        // The active identity, presented like the card it is: glyph, name,
+        // ICCID tail, and the APN it rides on.
+        Item {
           width: parent.width
-          spacing: Style.space(4)
-          InfoPair { label: "SIM"; value: root.activeSimName || "—" }
-          InfoPair { label: "APN"; value: root.info.apn || "automatic" }
+          implicitHeight: idCol.implicitHeight
+
+          readonly property var activeSim: {
+            for (var i = 0; i < root.sims.length; i++)
+              if (root.sims[i].active === "yes") return root.sims[i]
+            return null
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            id: idGlyph
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: parent.activeSim && parent.activeSim.kind === "esim" ? "󱤓" : "󰒧"
+            color: root.barForeground
+            opacity: 0.8
+            font.family: root.fontFamily
+            font.pixelSize: Math.round(Style.font.body * 1.6)
+          }
+
+          Column {
+            id: idCol
+            anchors.left: idGlyph.right
+            anchors.leftMargin: Style.space(8)
+            anchors.right: idTail.left
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              elide: Text.ElideRight
+              text: {
+                var a = idCol.parent.activeSim
+                return (a && (a.provider || a.name)) || root.simLabel || "No SIM"
+              }
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.weight: Font.DemiBold
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              elide: Text.ElideRight
+              text: "APN  " + (root.info.apn || "automatic")
+              color: root.barForeground
+              opacity: 0.55
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Column {
+            id: idTail
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              visible: text !== ""
+              text: {
+                var a = idTail.parent.activeSim
+                return a && a.provider && a.name && a.provider !== a.name ? a.name : ""
+              }
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              text: idTail.parent.activeSim
+                    ? "····" + String(idTail.parent.activeSim.iccid || "").slice(-4) : ""
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
         }
 
         // ---------- Data plan ----------
@@ -1329,7 +1431,7 @@ Panel {
                                  - apnChevron.implicitWidth - Style.space(16))
               horizontalAlignment: Text.AlignRight
               elide: Text.ElideRight
-              text: root.info.apn || "from network"
+              text: root.info.apn || "automatic"
               color: root.barForeground
               opacity: root.info.apn ? 1 : 0.6
               font.family: root.fontFamily
@@ -1418,7 +1520,7 @@ Panel {
               font.pixelSize: Style.font.caption
               verticalPadding: Style.space(2)
               width: parent.width
-              placeholderText: "APN — blank lets the network choose"
+              placeholderText: "APN — blank for automatic"
               foreground: root.barForeground
               enabled: !root.busy
               opacity: root.busy ? 0.5 : 1
