@@ -1964,7 +1964,7 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: diagHeader.verticalCenter
               anchors.verticalCenterOffset: Math.round(diagHeader.topPadding / 2)
-              text: root.diagLoading ? "Reading…" : "Read cells"
+              text: root.diagLoading ? "Surveying…" : "Survey cells"
               color: root.barForeground
               opacity: diagReadArea.containsMouse || root.diagLoading ? 1 : 0.6
               font.family: root.fontFamily
@@ -2147,7 +2147,7 @@ Panel {
             visible: root.diagCells.length === 0 && !root.diagLoading
             width: parent.width
             wrapMode: Text.WordWrap
-            text: "Nothing read yet. Read cells needs authorization."
+            text: "Nothing surveyed yet. Survey cells needs authorization."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
