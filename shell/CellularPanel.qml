@@ -228,12 +228,29 @@ Panel {
   // share a line, so a metric change restarts the history.
   property var rsrpHistory: []
   property string sparkMetric: ""
+  property double sparkGapStart: 0
   function recordStrength(rsrp, rssi) {
-    var metric = rsrp ? "RSRP" : rssi ? "RSSI" : ""
-    if (metric === "") return
-    var v = parseFloat(metric === "RSRP" ? rsrp : rssi)
-    if (isNaN(v)) return
     var now = Date.now()
+    // Sticky metric: the modem alternates which strength field it reports
+    // sample to sample, and switching on every alternation wiped the
+    // history and blinked the chart. Stay on the current metric through
+    // gaps; a sample without it is skipped, and only a sustained absence
+    // (45s) switches to whatever is still reporting.
+    var metric = sparkMetric || (rsrp ? "RSRP" : rssi ? "RSSI" : "")
+    if (metric === "") return
+    var raw = metric === "RSRP" ? rsrp : rssi
+    if (!raw) {
+      if (sparkGapStart === 0) { sparkGapStart = now; return }
+      if (now - sparkGapStart < 45000) return
+      var alt = rsrp ? "RSRP" : rssi ? "RSSI" : ""
+      if (alt === "") return
+      metric = alt
+      raw = metric === "RSRP" ? rsrp : rssi
+      rsrpHistory = []
+    }
+    sparkGapStart = 0
+    var v = parseFloat(raw)
+    if (isNaN(v)) return
     var h = sparkMetric === metric ? rsrpHistory.slice() : []
     sparkMetric = metric
     if (h.length > 0 && now - h[h.length - 1].t < 2000) return
