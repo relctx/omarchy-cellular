@@ -1056,8 +1056,8 @@ cmd_identify() {
   # ModemManager reads both of these off the SIM object without any privilege.
   # This command exists for when that object is unreadable, so it takes what is
   # there and only elevates for what is missing.
-  out=$(mmcli -i "$simpath" -K 2>/dev/null)
-  iccid=$(kv "$out" sim.properties.iccid)
+  local simdbus="/org/freedesktop/ModemManager1/SIM/$simpath"
+  iccid=$(sim_property "$simdbus" SimIdentifier)
   if [[ -n $iccid && $iccid != "--" ]]; then
     printf '%s' "$iccid" >"$STATE_DIR/iccid"
     echo "ICCID: $iccid"
@@ -1066,8 +1066,7 @@ cmd_identify() {
   fi
 
   local eid
-  eid=$(kv "$out" sim.properties.eid)
-  [[ $eid == "--" ]] && eid=""
+  eid=$(sim_property "$simdbus" Eid)
   [[ -n $eid ]] && printf '%s' "$eid" >"$STATE_DIR/eid"
 
   # Only the eUICC itself can supply an EID ModemManager did not report, and
@@ -1457,7 +1456,7 @@ mbim_port() {
 # slot advertises an eUICC -- including when the eSIM is the inactive card and
 # the modem declines to read it until it is selected.
 esim_slot() {
-  local dump n i sp props eid st
+  local dump n i sp eid st
   dump=$(modem_dump "$(modem_index)") || return 1
   n=$(kv "$dump" modem.generic.sim-slots.length)
   [[ $n =~ ^[0-9]+$ ]] || return 1
@@ -1465,11 +1464,11 @@ esim_slot() {
   for ((i = 1; i <= n; i++)); do
     sp=$(kv "$dump" "modem.generic.sim-slots.value[$i]")
     [[ -n $sp && $sp != / ]] || continue
-    props=$(mmcli -i "${sp##*/}" -K 2>/dev/null) || continue
-    eid=$(kv "$props" sim.properties.eid)
-    st=$(kv "$props" sim.properties.sim-type)
-    [[ $eid == "--" ]] && eid=""
-    if [[ -n $eid || ${st,,} == esim ]]; then
+    eid=$(sim_property "$sp" Eid)
+    st=$(sim_property "$sp" SimType)
+    # SimType: 1 physical, 2 esim. Plenty of modems report neither, which is
+    # why the EID is the marker and this only confirms it.
+    if [[ -n $eid || $st == 2 ]]; then
       printf '%s' "$i"
       return 0
     fi
@@ -1665,6 +1664,17 @@ esim_run() {
     return 1
   }
   return 0
+}
+
+# One property off a SIM object, over the bus. mmcli -i takes SIGSEGV when the
+# object is being rebuilt, and SIM objects are rebuilt on every slot switch and
+# every profile change, so nothing that runs on a poll may use it.
+sim_property() {
+  local path=$1 name=$2
+  [[ $path == /org/freedesktop/ModemManager1/SIM/* ]] || return 1
+  busctl get-property org.freedesktop.ModemManager1 "$path" \
+    org.freedesktop.ModemManager1.Sim "$name" 2>/dev/null |
+    sed -n 's/^s "\(.*\)"$/\1/p; s/^u \([0-9]*\)$/\1/p'
 }
 
 # The ICCID ModemManager currently believes is on the card, read straight off
@@ -2215,8 +2225,8 @@ carrier_auto() {
   # The SIM carries the same code regardless.
   code=$(kv "$dump" modem.3gpp.operator-code)
   if [[ -z $code ]]; then
-    sim=$(kv "$dump" modem.generic.sim | sed 's|.*/SIM/||')
-    [[ -n $sim ]] && code=$(kv "$(mmcli -i "$sim" -K 2>/dev/null)" sim.properties.operator-code)
+    sim=$(kv "$dump" modem.generic.sim)
+    [[ -n $sim ]] && code=$(sim_property "$sim" OperatorIdentifier)
   fi
 
   # Resolve a human carrier name when we can; it is only ever a label.
