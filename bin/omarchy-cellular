@@ -961,62 +961,53 @@ read_details() {
 
 # `mode` with no argument prints the current allowed set; with arguments it sets
 # them. "auto" means every mode the modem supports, preferring the fastest.
-# The APNs the carrier provisioned into this SIM, from ModemManager's 3GPP
-# profile manager. Not every modem implements that interface; an empty answer
-# means the modem does not report them, not that there are none.
+# What this SIM is provisioned with and what the modem is using, from
+# ModemManager. The initial EPS bearer is the carrier's own setting, attached
+# at registration; the bearers are what has actually been dialled. A modem that
+# reports neither is not hiding a list -- MBIM exposes no equivalent of the
+# modem's local context table, so there is nothing further to ask it for.
 cmd_apn_list() {
-  need_jq || return 1
-
-  local idx json
+  local idx dump cur bearer_apn ip found=0
   idx=$(modem_index) || {
     echo "No modem detected." >&2
     return 1
   }
-
-  json=$(busctl --json=short call org.freedesktop.ModemManager1 \
-    "/org/freedesktop/ModemManager1/Modem/$idx" \
-    org.freedesktop.ModemManager1.Modem.Modem3gpp.ProfileManager List 2>/dev/null) || {
-    echo "This modem does not report its provisioned APNs to ModemManager." >&2
-    return 1
-  }
-
-  local rows
-  rows=$(jq -r '
-    (.data[0] // [])
-    | to_entries[]
-    | (.value["profile-id"].data // .key) as $ctx
-    | (.value.apn.data // "") as $apn
-    | (.value["ip-type"].data // 0) as $ip
-    | select($apn != "")
-    | "\($ctx)\t\($apn)\t\($ip)"
-  ' <<<"$json" 2>/dev/null)
-
-  [[ -n $rows ]] || {
-    echo "ModemManager reports no provisioned APNs for this SIM." >&2
-    echo "Some modems do not expose them. The one in use is shown by: omarchy-cellular status" >&2
-    return 1
-  }
-
-  local cur
+  dump=$(modem_dump "$idx") || return 1
   cur=$(get_cfg APN)
 
-  local ctx apn ip iptype note
-  while IFS=$'\t' read -r ctx apn ip; do
-    # MMBearerIpFamily: 1 IPv4, 2 IPv6, 3 IPv4v6.
-    case $ip in
-    1) iptype=IP ;;
-    2) iptype=IPV6 ;;
-    3) iptype=IPV4V6 ;;
-    *) iptype="--" ;;
-    esac
-    note=""
-    case "${apn,,}" in
-    ims) note="  (VoLTE signalling — not for data)" ;;
-    sos | emergency) note="  (emergency calls — not for data)" ;;
-    esac
-    [[ $ctx == 1 ]] && note="${note:-  (default)}"
-    printf '  %s%-24s %-8s%s\n' "$([[ $apn == "$cur" ]] && echo '* ' || echo '  ')" "$apn" "$iptype" "$note"
-  done <<<"$rows"
+  local mark
+  mark() { [[ $1 == "$cur" && -n $cur ]] && printf '* ' || printf '  '; }
+
+  bearer_apn=$(kv "$dump" modem.3gpp.eps.initial-bearer.settings.apn)
+  ip=$(kv "$dump" modem.3gpp.eps.initial-bearer.settings.ip-type)
+  if [[ -n $bearer_apn && $bearer_apn != "--" ]]; then
+    printf '  %s%-24s %-8s%s\n' "$(mark "$bearer_apn")" "$bearer_apn" \
+      "${ip:---}" "  (provisioned by the carrier)"
+    found=1
+  fi
+
+  local b bdump bapn bip bconn
+  for b in $(sed -n 's/^[[:space:]]*modem\.generic\.bearers\.value\[[0-9]*\][[:space:]]*:[[:space:]]*//p' <<<"$dump"); do
+    bdump=$(mmcli -b "$b" -K 2>/dev/null) || continue
+    bapn=$(kv "$bdump" bearer.properties.apn)
+    [[ -n $bapn && $bapn != "--" ]] || continue
+    bip=$(kv "$bdump" bearer.properties.ip-type)
+    bconn=$(kv "$bdump" bearer.status.connected)
+    printf '  %s%-24s %-8s%s\n' "$(mark "$bapn")" "$bapn" "${bip:---}" \
+      "$([[ $bconn == yes ]] && echo "  (in use)" || echo "  (configured on a bearer)")"
+    found=1
+  done
+
+  if ((found == 0)); then
+    echo "The modem reports no APN for this SIM." >&2
+    if [[ -n $cur ]]; then
+      echo "Configured by hand: $cur" >&2
+    else
+      echo "None is configured, so the network chooses -- which is what an eSIM expects." >&2
+    fi
+    return 1
+  fi
+
   echo
   echo "* = currently configured.  Set one with: omarchy-cellular apn <name>"
 }
