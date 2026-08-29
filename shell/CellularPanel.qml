@@ -544,9 +544,64 @@ Panel {
     onTriggered: root.copied = ""
   }
 
-  // Background poll for the bar icon; the open panel has its own cadence.
+  // ------------------------------------------------------------ event feed
+  // ModemManager and NetworkManager broadcast every state change as a D-Bus
+  // signal, and gdbus monitor subscribes with ordinary match rules -- no
+  // privilege, unlike busctl's root-only monitor mode. Each signal schedules
+  // one debounced refresh, so a burst (a profile enable emits a dozen) costs
+  // one CLI run. Polling below survives only as a slow fallback.
+  function busEvent(line) {
+    // Non-signal chatter: the two header lines, name-owner notices.
+    if (line.length === 0 || line[0] !== "/") return
+    // Signal-strength samples arrive every few seconds while polling is
+    // armed. They only matter when the panel is open; refreshing the bar
+    // for each would out-poll the polling this feed replaces.
+    if (line.indexOf(".Signal',") !== -1 || line.indexOf("SignalQuality") !== -1) {
+      if (root.opened) eventDebounce.restart()
+      return
+    }
+    eventDebounce.restart()
+  }
+
   Timer {
-    interval: Math.max(2, root.setting("interval", 10)) * 1000
+    id: eventDebounce
+    interval: 300
+    onTriggered: root.opened ? root.refreshDetails() : root.refresh()
+  }
+
+  // component MonitorProc is not possible for Process; two literal blocks.
+  Process {
+    id: mmMonitor
+    command: ["gdbus", "monitor", "-y", "-d", "org.freedesktop.ModemManager1"]
+    running: true
+    stdout: SplitParser { onRead: function (line) { root.busEvent(line) } }
+    onExited: monitorRestart.restart()
+  }
+
+  Process {
+    id: nmMonitor
+    command: ["gdbus", "monitor", "-y", "-d", "org.freedesktop.NetworkManager"]
+    running: true
+    stdout: SplitParser { onRead: function (line) { root.busEvent(line) } }
+    onExited: monitorRestart.restart()
+  }
+
+  // A monitor that died missed events; resync fully when it returns.
+  Timer {
+    id: monitorRestart
+    interval: 2000
+    onTriggered: {
+      if (!mmMonitor.running) mmMonitor.running = true
+      if (!nmMonitor.running) nmMonitor.running = true
+      root.opened ? root.refreshDetails() : root.refresh()
+    }
+  }
+
+  // Fallback only: the event feed above does the real work, and this catches
+  // whatever a dead monitor or a missed signal left behind. It is also the
+  // usage meter's heartbeat, so it stays regular rather than rare.
+  Timer {
+    interval: Math.max(30, root.setting("interval", 60)) * 1000
     running: !root.opened
     repeat: true
     triggeredOnStart: true
