@@ -1662,6 +1662,144 @@ esim_run() {
   return 0
 }
 
+# SGP.22 activation code: LPA:1$<smdp-server>$<matching-id> with two optional
+# fields after. Checked against the grammar rather than the prefix, because it
+# arrives from a QR image or a paste and goes on to lpac.
+activation_code_ok() {
+  [[ $1 =~ ^LPA:1\$[A-Za-z0-9.-]{1,255}\$[A-Za-z0-9._~-]{1,128}(\$[A-Za-z0-9._~-]{0,128}){0,2}$ ]]
+}
+
+# A profile session: one authorization, then as many operations as the panel
+# asks for. pkexec caches nothing, so without this each click is its own
+# prompt; the alternative -- a root helper installed on the system -- is the
+# root component this plugin deliberately does not have.
+#
+# The privileged half is an inline script, never a file on disk: it runs as
+# root, and a file in the plugin directory is writable by the user it would be
+# elevating. It accepts a fixed set of verbs and nothing else, exits when its
+# stdin closes, and gives up after three minutes of silence so a forgotten
+# session cannot sit there as root.
+#
+# Reads commands on stdin, one per line. Writes each answer followed by a
+# terminator line, so the caller knows where one answer ends.
+ESIM_SESSION_IDLE=180
+
+cmd_esim_session() {
+  profile_precheck || return 1
+
+  local dev slot
+  dev=$(mbim_port) && dev_node_ok "$dev" || {
+    echo "This modem exposes no MBIM port." >&2
+    return 1
+  }
+  lpac_has_driver mbim || {
+    echo "This lpac has no mbim driver." >&2
+    return 1
+  }
+  slot=$(esim_slot) || {
+    echo "No slot on this modem reports an eUICC." >&2
+    return 1
+  }
+
+  local lock
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  exec {lock}>"$STATE_DIR/lpac.lock" 2>/dev/null || true
+  flock -w 10 "$lock" 2>/dev/null || {
+    echo "Another eSIM operation is running." >&2
+    return 1
+  }
+
+  coproc PRIV {
+    pkexec sh -c '
+      dev=$1 slot=$2 idle=$3
+      export LPAC_APDU=mbim LPAC_APDU_MBIM_DEVICE="$dev" \
+        LPAC_APDU_MBIM_UIM_SLOT="$slot" LPAC_APDU_MBIM_USE_PROXY=1
+      while IFS=" " read -r -t "$idle" verb rest; do
+        out="" rc=0
+        case $verb in
+        list) out=$(lpac profile list); rc=$? ;;
+        enable) out=$(lpac profile enable "$rest"); rc=$? ;;
+        disable) out=$(lpac profile disable "$rest"); rc=$? ;;
+        delete) out=$(lpac profile delete "$rest"); rc=$? ;;
+        nickname)
+          iccid=${rest%% *}
+          name=${rest#* }
+          out=$(lpac profile nickname "$iccid" "$name"); rc=$?
+          ;;
+        download) out=$(lpac profile download -a "$rest"); rc=$? ;;
+        quit) break ;;
+        *) rc=64 ;;
+        esac
+        printf "%s\n===END %s===\n" "$out" "$rc"
+      done
+    ' sh "$dev" "$slot" "$ESIM_SESSION_IDLE"
+  } 2>/dev/null
+
+  # Tell the caller the authorization is done and the session is live, so a
+  # panel can stop showing a prompt-pending state.
+  printf 'session=ready\n'
+
+  local line verb rest reply
+  while IFS=' ' read -r verb rest; do
+    case $verb in
+    list) line="list" ;;
+    enable | disable | delete)
+      [[ $rest =~ ^[0-9]{10,22}$ ]] || {
+        printf 'error=bad iccid\n===END 64===\n'
+        continue
+      }
+      line="$verb $rest"
+      ;;
+    nickname)
+      local iccid name
+      iccid=${rest%% *}
+      name=${rest#* }
+      [[ $iccid =~ ^[0-9]{10,22}$ ]] || {
+        printf 'error=bad iccid\n===END 64===\n'
+        continue
+      }
+      # One line per command is the protocol; a newline in a nickname would
+      # forge a second command.
+      name=${name//[$'\n\r']/ }
+      name=${name:0:64}
+      line="nickname $iccid $name"
+      ;;
+    download)
+      activation_code_ok "$rest" || {
+        printf 'error=bad activation code\n===END 64===\n'
+        continue
+      }
+      line="download $rest"
+      ;;
+    quit | '') break ;;
+    *)
+      printf 'error=unknown command\n===END 64===\n'
+      continue
+      ;;
+    esac
+
+    printf '%s\n' "$line" >&"${PRIV[1]}"
+
+    # Read the answer up to its terminator, then render it the way the
+    # one-shot commands do.
+    local json="" chunk rc=0
+    while IFS= read -r chunk <&"${PRIV[0]}"; do
+      case $chunk in
+      "===END "*) rc=${chunk#===END }; rc=${rc%%===*}; break ;;
+      *) json+="$chunk"$'\n' ;;
+      esac
+    done
+
+    if [[ $verb == list || $rc == 0 ]]; then
+      profiles_render "$(printf '%s' "$json")" 2>/dev/null
+    fi
+    printf 'rc=%s\n===END %s===\n' "$rc" "$rc"
+  done
+
+  printf 'quit\n' >&"${PRIV[1]}" 2>/dev/null || true
+  exec {lock}>&- 2>/dev/null || true
+}
+
 # Guard shared by every profile command.
 profile_precheck() {
   need_jq || return 1
@@ -1770,10 +1908,7 @@ cmd_scan() {
     return 1
   }
 
-  # SGP.22 activation code: LPA:1$<smdp-server>$<matching-id> with two optional
-  # fields after. Checked against that grammar, not just the prefix, because
-  # this comes out of an image and goes on to lpac.
-  [[ $code =~ ^LPA:1\$[A-Za-z0-9.-]{1,255}\$[A-Za-z0-9._~-]{1,128}(\$[A-Za-z0-9._~-]{0,128}){0,2}$ ]] || {
+  activation_code_ok "$code" || {
     echo "That QR code is not an eSIM activation code:" >&2
     echo "  $code" >&2
     notify "Not an eSIM activation code"
@@ -2388,6 +2523,7 @@ prefer)
   ;;
 sim) cmd_sim "${2:-}" "${3:-}" ;;
 profile) cmd_profile "${2:-}" "${3:-}" "${4:-}" ;;
+esim-session) cmd_esim_session ;;
 mode) cmd_mode "${2:-}" ;;
 at) cmd_at "${2:-}" ;;
 identify) cmd_identify ;;
@@ -2436,6 +2572,7 @@ usage: omarchy-cellular <command>
   apply               re-read cellular.conf and reconnect
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
   profile ...         eSIM profiles: list, enable, delete, nickname, download, scan
+  esim-session        one authorization, then profile commands on stdin (the panel)
   carrier ...         pick country/carrier and apply its APN (see: carrier)
   limit ...           monthly/daily data cap with auto-cutoff (see: limit)
   apn <name>          set the APN by hand

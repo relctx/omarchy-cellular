@@ -56,18 +56,104 @@ Panel {
   // anything. Mark the list as possibly out of date instead of guessing.
   property bool profilesStale: false
 
-  function loadProfiles() {
-    // Clicking again cancels a run waiting on the authorization prompt.
-    if (profilesLoading) {
-      profileProc.running = false
-      profilesLoading = false
-      profileError = "Cancelled."
+  // One authorization covers a whole eSIM session: the CLI keeps the elevated
+  // half open and feeds it commands, so every action after the first costs
+  // nothing. The session lives only while the profile list is on screen.
+  property bool sessionReady: false
+  property var sessionQueue: []
+  property string sessionVerb: ""
+  property var sessionLines: []
+
+  function sessionStart() {
+    if (sessionProc.running) return
+    root.sessionReady = false
+    root.sessionQueue = []
+    root.sessionVerb = ""
+    root.sessionLines = []
+    sessionProc.command = [root.cli, "esim-session"]
+    sessionProc.running = true
+  }
+
+  function sessionStop() {
+    if (!sessionProc.running) return
+    sessionProc.write("quit\n")
+    sessionProc.running = false
+    root.sessionReady = false
+    root.sessionVerb = ""
+    root.sessionQueue = []
+  }
+
+  function sessionSend(cmd) {
+    var q = root.sessionQueue.slice()
+    q.push(cmd)
+    root.sessionQueue = q
+    if (!sessionProc.running) { sessionStart(); return }
+    root.sessionPump()
+  }
+
+  function sessionPump() {
+    if (!root.sessionReady || root.sessionVerb !== "") return
+    if (root.sessionQueue.length === 0) return
+    var q = root.sessionQueue.slice()
+    var cmd = q.shift()
+    root.sessionQueue = q
+    root.sessionVerb = cmd.split(" ")[0]
+    root.sessionLines = []
+    root.profilesLoading = true
+    sessionProc.write(cmd + "\n")
+  }
+
+  function sessionLine(line) {
+    if (line === "session=ready") {
+      root.sessionReady = true
+      root.sessionPump()
       return
     }
-    profilesLoading = true
-    profileError = ""
-    profileProc.command = [root.cli, "profile", "list"]
-    profileProc.running = true
+    if (line.indexOf("===END ") === 0) {
+      root.sessionDone(root.sessionVerb, line.replace("===END ", "").replace("===", ""))
+      return
+    }
+    if (line.indexOf("profile.") === 0) {
+      var l = root.sessionLines.slice()
+      l.push(line)
+      root.sessionLines = l
+    } else if (line.indexOf("error=") === 0) {
+      root.profileError = line.substring(6)
+    }
+  }
+
+  function sessionDone(verb, rc) {
+    var lines = root.sessionLines
+    root.sessionVerb = ""
+    root.sessionLines = []
+    root.profilesLoading = false
+
+    if (verb === "list") {
+      root.profiles = root.parseProfiles(lines.join("\n"))
+      root.profilesStale = false
+      if (root.profiles.length === 0 && root.profileError === "")
+        root.profileError = "Could not read the eSIM."
+      root.sessionPump()
+      return
+    }
+
+    if (rc !== "0") {
+      // The row was changed before the command ran, so put it back.
+      if (root.profilesUndo.length > 0) root.profiles = root.profilesUndo
+      root.profilesUndo = []
+      if (root.profileError === "") root.profileError = "That did not work."
+      root.sessionPump()
+      return
+    }
+
+    root.profilesUndo = []
+    // The change landed. The authoritative list costs nothing now.
+    root.sessionSend("list")
+  }
+
+  function loadProfiles() {
+    root.profileError = ""
+    root.sessionSend("list")
   }
 
   // Button sizes to its content, so a long profile name pushes the action chips
@@ -367,7 +453,12 @@ Panel {
   }
   property string copied: ""
 
-  onOpenedChanged: if (!opened) resetStats()
+  onOpenedChanged: if (!opened) {
+    resetStats()
+    // Nothing elevated outlives the panel.
+    root.esimExpanded = false
+    root.sessionStop()
+  }
 
   visible: hwPresent
   implicitWidth: hwPresent ? button.implicitWidth : 0
@@ -410,6 +501,23 @@ Panel {
       }
       root.profilesUndo = []
       root.opened ? root.refreshDetails() : root.refresh()
+    }
+  }
+
+  Process {
+    id: sessionProc
+    stdinEnabled: true
+    stdout: SplitParser { onRead: function (line) { root.sessionLine(line) } }
+    stderr: StdioCollector { id: sessionErr; waitForEnd: true }
+    onExited: function (code) {
+      root.sessionReady = false
+      root.sessionVerb = ""
+      root.sessionQueue = []
+      root.profilesLoading = false
+      if (code !== 0 && root.esimExpanded) {
+        var e = (sessionErr.text || "").trim()
+        if (e !== "") root.profileError = e
+      }
     }
   }
 
@@ -1342,7 +1450,10 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: {
                 root.esimExpanded = !root.esimExpanded
-                if (root.esimExpanded && root.profiles.length === 0) root.loadProfiles()
+                // The one authorization is spent here, on opening the list.
+                // Closing it ends the elevated half rather than leaving it.
+                if (root.esimExpanded) root.loadProfiles()
+                else root.sessionStop()
               }
             }
           }
@@ -1417,7 +1528,7 @@ Panel {
                     foreground: root.barForeground
                     fontFamily: root.fontFamily
                     onClicked: if (!root.profileEnabled(modelData)) {
-                      root.runAction([root.cli, "profile", "enable", modelData.iccid])
+                      root.sessionSend("enable " + modelData.iccid)
                       root.applyProfileChange(modelData.iccid, "enable")
                     }
                   }
@@ -1460,7 +1571,7 @@ Panel {
                     foreground: root.barForeground
                     fontFamily: root.fontFamily
                     onClicked: if (!root.profileEnabled(modelData)) {
-                      root.runAction([root.cli, "profile", "delete", modelData.iccid])
+                      root.sessionSend("delete " + modelData.iccid)
                       root.applyProfileChange(modelData.iccid, "delete")
                     }
                   }
@@ -1483,8 +1594,7 @@ Panel {
                   onAccepted: {
                     var target = root.renamingIccid
                     if (target !== "" && text.trim() !== "") {
-                      if (!root.runAction([root.cli, "profile", "nickname", target, text.trim()]))
-                        return
+                      root.sessionSend("nickname " + target + " " + text.trim())
                       root.applyProfileChange(target, "rename", text.trim())
                     }
                     root.renamingIccid = ""
@@ -1584,9 +1694,8 @@ Panel {
                   }
                   onAccepted: {
                     if (text.trim() !== "") {
-                      if (!root.runAction([root.cli, "profile", "download", text.trim()]))
-                        return
-                      root.profileError = "Downloaded."
+                      root.sessionSend("download " + text.trim())
+                      root.profileError = "Downloading…"
                     }
                     root.addingProfile = false
                     text = ""
