@@ -1811,7 +1811,7 @@ carrier_write() { # <apn> <label> <user> <password> <provider>
 }
 
 carrier_auto() {
-  local idx dump code mcc mnc row cc country provider apn sim bearer_apn
+  local idx dump code row cc country provider sim bearer_apn
 
   idx=$(modem_index_wait)
   [[ -n $idx ]] || {
@@ -1852,51 +1852,19 @@ carrier_auto() {
     return 0
   fi
 
-  # A modem whose only bearer is a signalling context is an eSIM negotiating its
-  # own APN; leave it blank. Setting any value gets "service option not
-  # subscribed". Nothing here elevates.
+  # No data APN to copy: either the only bearer is a signalling context, or the
+  # modem names nothing at all. Both mean the same thing here. The database
+  # holds the host network's APN, which is wrong for an MVNO and for an eSIM
+  # negotiating its own, so blank is the safer of the two answers: the network
+  # picks, and a carrier that truly needs a value can still be set by hand.
   if ((signalling_only)); then
     echo "The modem is provisioned with no data APN${provider:+ for $provider}."
-    echo "Leaving it blank so the network chooses, which is what an eSIM profile expects."
-    carrier_write "" "" "" "" "${provider:-the network}"
-    return 0
+  else
+    echo "The modem does not report an APN${provider:+ for $provider}."
   fi
-
-  # An empty bearer is not evidence either way. The database supplies the host
-  # network's APN, which is wrong for an MVNO and for an eSIM negotiating its
-  # own, and a wrong APN takes down a working connection.
-  if [[ -z $bearer_apn ]]; then
-    echo "The modem does not report which APN it was provisioned with." >&2
-    echo "Not guessing: a wrong APN drops a working connection." >&2
-    echo >&2
-    echo "  omarchy-cellular apn list     what the modem is actually configured with" >&2
-    echo "  omarchy-cellular apn ''       let the network choose (usually right for eSIM)" >&2
-    echo "  omarchy-cellular carrier list pick from the database by hand" >&2
-    return 1
-  fi
-
-  [[ -n $code ]] || {
-    echo "No operator code on the modem or the SIM. Pick the carrier by hand:" >&2
-    echo "    omarchy-cellular carrier list" >&2
-    return 1
-  }
-
-  # An operator code is MCC (always 3 digits) followed by a 2- or 3-digit MNC.
-  mcc=${code:0:3}
-  mnc=${code:3}
-
-  row=$($PROVIDERS lookup "$mcc" "$mnc") || return 1
-  IFS=$'\t' read -r cc country provider <<<"$row"
-
-  apn=$($PROVIDERS apns "$cc" "$provider" | head -1)
-  [[ -n $apn ]] || {
-    echo "$provider ($country) has no data APN in the database." >&2
-    return 1
-  }
-
-  echo "Detected $provider in $country (MCC $mcc, MNC $mnc)."
-  IFS=$'\t' read -r value label user password <<<"$apn"
-  carrier_write "$value" "$label" "$user" "$password" "$provider"
+  echo "Leaving it blank so the network chooses, which is what an eSIM profile expects."
+  echo "If this carrier needs a specific APN: omarchy-cellular carrier list"
+  carrier_write "" "" "" "" "${provider:-the network}"
 }
 
 # Apply the config and report via notifications; the menu-driven flows run
