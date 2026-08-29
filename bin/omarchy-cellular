@@ -13,7 +13,19 @@ NM_CONN="${OMARCHY_CELLULAR_CONN:-Omarchy Cellular}"
 # name; keep both pointing at the same place.
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cellular"
 STATE_DIR=$STATE
+# Pre-card-split accounting; still read for a card never seen since.
 USAGE_FILE="$STATE_DIR/usage"
+
+# Each card runs its own meter against its own plan.
+usage_file() {
+  local i
+  i=$(active_iccid)
+  if [[ $i =~ ^[0-9]{10,22}$ ]]; then
+    printf '%s/usage.%s' "$STATE_DIR" "$i"
+  else
+    printf '%s' "$USAGE_FILE"
+  fi
+}
 PLUGIN_DIR="$HOME/.config/omarchy/plugins/relctx.cellular"
 
 # Where to point the user for repairs: an explicit override, then the shell
@@ -442,7 +454,7 @@ ensure_cfg() {
 # below route these keys there whenever a card is present. cellular.conf keeps
 # only what belongs to the machine.
 CARD_DIR="$HOME/.config/omarchy/cellular.d"
-CARD_KEYS=" APN APN_USER APN_PASS PIN OPERATOR_ID CARRIER "
+CARD_KEYS=" APN APN_USER APN_PASS PIN OPERATOR_ID CARRIER DATA_LIMIT DATA_PERIOD DATA_RESET_DAY DATA_DAYS DATA_START "
 
 # The active card's ICCID, cached for the run: the panel feed calls the
 # accessors dozens of times.
@@ -482,6 +494,19 @@ card_wait_resolvable() {
 card_ensure() {
   local f
   f=$(card_file) || return 0
+  # A plan set before the card split was set knowingly; carry it onto a card
+  # that has none rather than silently dropping the limit. Runs once per card:
+  # after the copy the key exists.
+  if [[ -f $f ]] && ! grep -q '^DATA_LIMIT=' "$f" 2>/dev/null; then
+    local lv
+    lv=$(sed -n 's/^[[:space:]]*DATA_LIMIT[[:space:]]*=//p' "$CONFIG" 2>/dev/null | tail -1)
+    if [[ -n $lv ]]; then
+      local k
+      for k in DATA_LIMIT DATA_PERIOD DATA_RESET_DAY DATA_DAYS DATA_START; do
+        sed -n "s/^[[:space:]]*$k[[:space:]]*=/$k=/p" "$CONFIG" 2>/dev/null | tail -1 >>"$f"
+      done
+    fi
+  fi
   [[ -f $f ]] && return 0
   mkdir -p "$CARD_DIR" && chmod 700 "$CARD_DIR"
   : >"$f" && chmod 600 "$f"
@@ -814,56 +839,94 @@ meter_iface() {
   return 1
 }
 
+# Credit traffic to a card's accumulator without touching its other fields.
+add_usage_to() { # <iccid> <d_rx> <d_tx>
+  local f="$STATE_DIR/usage.$1" rx=0 tx=0 rest=""
+  local k v
+  if [[ -r $f ]]; then
+    while IFS='=' read -r k v; do
+      case $k in
+      rx) rx=$v ;;
+      tx) tx=$v ;;
+      *) [[ -n $k ]] && rest+="$k=$v"$'\n' ;;
+      esac
+    done <"$f"
+  fi
+  printf '%srx=%s\ntx=%s\n' "$rest" "$((rx + $2))" "$((tx + $3))" >"$f"
+}
+
 # Accumulate usage and enforce the limit. Sets USED_BYTES, LIMIT_BYTES,
 # LIMIT_ACK. Expects read_state to have run (uses the modem STATE/IFACE).
+#
+# Every card shares one netdev and one pair of kernel counters, so a delta
+# belongs to whichever card was active across it. One global snapshot records
+# the counters and the card that owned them at the last sample; each card
+# accumulates in its own file against its own plan and period.
 meter_update() {
-  local iface cur_rx cur_tx d_rx d_tx have_state=0
-  local u_start="" u_end="" u_rx=0 u_tx=0 u_lrx=0 u_ltx=0 u_ack=0
+  local iface cur_rx cur_tx
   mkdir -p "$STATE_DIR"
   period_bounds
 
-  if [[ -r $USAGE_FILE ]]; then
-    have_state=1
+  local uf u_start="" u_end="" u_rx=0 u_tx=0 u_ack=0 k v
+  uf=$(usage_file)
+  if [[ -r $uf ]]; then
     while IFS='=' read -r k v; do
       case $k in
       period_start) u_start=$v ;;
       period_end) u_end=$v ;;
       rx) u_rx=$v ;;
       tx) u_tx=$v ;;
-      last_rx) u_lrx=$v ;;
-      last_tx) u_ltx=$v ;;
       ack) u_ack=$v ;;
       esac
-    done <"$USAGE_FILE"
+    done <"$uf"
   fi
 
-  # Reset when the stored end date has arrived. Changing the renewal day or the
-  # period type moves the start date too, and that is not a renewal.
-  #
-  # Counter snapshots are kept either way; the kernel counters did not reset.
+  # Reset when the stored end date has arrived. Changing the renewal day or
+  # the period type moves the start date too, and that is not a renewal.
   if [[ -n $u_end && $(date +%F) > $u_end ]]; then
     u_rx=0 u_tx=0 u_ack=0
   fi
 
+  local snap="$STATE_DIR/counter" s_iccid="" s_rx=0 s_tx=0 cur_iccid
+  if [[ -r $snap ]]; then
+    while IFS='=' read -r k v; do
+      case $k in
+      iccid) s_iccid=$v ;;
+      rx) s_rx=$v ;;
+      tx) s_tx=$v ;;
+      esac
+    done <"$snap"
+  fi
+  cur_iccid=$(active_iccid)
+
   if iface=$(meter_iface) && [[ -r /sys/class/net/$iface/statistics/rx_bytes ]]; then
     cur_rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes")
     cur_tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes")
-    if ((have_state)); then
-      # A counter below the last snapshot means the netdev was re-created
-      # (reboot, replug, suspend): everything on it is new traffic.
-      ((cur_rx >= u_lrx)) && d_rx=$((cur_rx - u_lrx)) || d_rx=$cur_rx
-      ((cur_tx >= u_ltx)) && d_tx=$((cur_tx - u_ltx)) || d_tx=$cur_tx
-      u_rx=$((u_rx + d_rx))
-      u_tx=$((u_tx + d_tx))
+    local d_rx d_tx owner=$s_iccid
+    if ((cur_rx < s_rx || cur_tx < s_tx)); then
+      # Counters restarted (reboot, replug): everything on them accrued on
+      # the re-created interface, which is the current card's.
+      d_rx=$cur_rx d_tx=$cur_tx owner=$cur_iccid
+    else
+      d_rx=$((cur_rx - s_rx)) d_tx=$((cur_tx - s_tx))
     fi
-    # First run only snapshots: the counters may hold traffic from before the
-    # meter existed.
-    u_lrx=$cur_rx
-    u_ltx=$cur_tx
+    # A first-ever sample has no owner; the counters may hold traffic from
+    # before the meter existed, so it only snapshots.
+    if [[ -n $owner ]] && ((d_rx > 0 || d_tx > 0)); then
+      if [[ $owner == "$cur_iccid" ]]; then
+        u_rx=$((u_rx + d_rx))
+        u_tx=$((u_tx + d_tx))
+      else
+        # The interval straddled a card change; the traffic was the previous
+        # card's. Its period rollover is checked when it is next active.
+        add_usage_to "$owner" "$d_rx" "$d_tx"
+      fi
+    fi
+    printf 'iccid=%s\nrx=%s\ntx=%s\n' "$cur_iccid" "$cur_rx" "$cur_tx" >"$snap"
   fi
 
-  printf 'period_start=%s\nperiod_end=%s\nrx=%s\ntx=%s\nlast_rx=%s\nlast_tx=%s\nack=%s\n' \
-    "$PERIOD_START" "$PERIOD_NEXT" "$u_rx" "$u_tx" "$u_lrx" "$u_ltx" "$u_ack" >"$USAGE_FILE"
+  printf 'period_start=%s\nperiod_end=%s\nrx=%s\ntx=%s\nack=%s\n' \
+    "$PERIOD_START" "$PERIOD_NEXT" "$u_rx" "$u_tx" "$u_ack" >"$uf"
 
   USED_BYTES=$((u_rx + u_tx))
   LIMIT_BYTES=$(limit_bytes)
@@ -933,7 +996,7 @@ cmd_limit() {
     echo "Period set to $2 days, started $PERIOD_START, resets $PERIOD_NEXT."
     ;;
   reset)
-    rm -f "$USAGE_FILE"
+    rm -f "$(usage_file)" "$STATE_DIR/counter"
     # On a fixed-length bundle the window restarts too. Monthly and daily
     # windows come from the calendar and have nothing to re-anchor.
     if [[ $(get_cfg DATA_PERIOD) == days ]]; then
@@ -1558,9 +1621,11 @@ card_track() {
   local i last f="$STATE_DIR/card-synced"
   i=$(active_iccid)
   [[ -n $i ]] || return 0
+  # ensure runs even for an unchanged card: it also carries a pre-split plan
+  # onto a card file that lacks one, and both checks are two stats and a grep.
+  card_ensure
   last=$(cat "$f" 2>/dev/null)
   [[ $i == "$last" ]] && return 0
-  card_ensure
   nm_apply >/dev/null 2>&1 || return 0
   mkdir -p "$STATE_DIR" && printf '%s' "$i" >"$f"
 }
@@ -1634,6 +1699,8 @@ cmd_panel() {
   printf 'next_reset=%s\n' "$PERIOD_NEXT"
   printf 'period_start=%s\n' "$PERIOD_START"
   printf 'reset_day=%s\n' "$(get_cfg DATA_RESET_DAY | grep . || echo 1)"
+  printf 'plan_start=%s\n' "$PERIOD_START"
+  printf 'plan_end=%s\n' "$PERIOD_NEXT"
   printf 'period_days=%s\n' "$(get_cfg DATA_DAYS | grep . || echo 30)"
   printf 'limit_ack=%s\n' "$LIMIT_ACK"
 
@@ -1702,7 +1769,7 @@ cmd_connect() {
   read_state
   meter_update
   if ((LIMIT_BYTES > 0 && USED_BYTES >= LIMIT_BYTES && LIMIT_ACK == 0)); then
-    sed -i 's/^ack=.*/ack=1/' "$USAGE_FILE"
+    sed -i 's/^ack=.*/ack=1/' "$(usage_file)"
     notify "Over the data limit ($(fmt_bytes "$USED_BYTES") used) — auto-cutoff disabled until the period resets"
   fi
   notify "Connecting…"
