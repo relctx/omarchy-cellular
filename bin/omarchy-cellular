@@ -961,6 +961,67 @@ read_details() {
 
 # `mode` with no argument prints the current allowed set; with arguments it sets
 # them. "auto" means every mode the modem supports, preferring the fastest.
+# Everything the modem will say about the current signal. ModemManager reports
+# what the transport gives it, which over MBIM basic signal state is a single
+# strength value and a SNR. The ATDS service returns each quantity separately,
+# including RSRQ, which no unprivileged path provides.
+#
+# ATDS needs the MBIM port, so this costs one authorization and is a command
+# you run rather than anything the panel polls.
+cmd_signal() {
+  # read_signal is a no-op unless STATE says connected, and STATE comes from
+  # read_state.
+  read_state
+  read_signal
+
+  echo "ModemManager (${SIG_TECH:-unknown}):"
+  local any=0 f v
+  for f in RSSI RSRP RSRQ SNR ECIO; do
+    v=SIG_$f
+    v=${!v}
+    [[ -n $v ]] || continue
+    printf '  %-6s %s\n' "$f" "$v"
+    any=1
+  done
+  ((any)) || echo "  nothing reported"
+
+  local dev
+  dev=$(mbim_port) && dev_node_ok "$dev" || return 0
+  command -v qmicli >/dev/null || return 0
+
+  echo
+  echo "Modem (one authorization):"
+  local out
+  out=$(pkexec qmicli --device="$dev" --device-open-mbim --device-open-proxy \
+    --nas-get-signal-info 2>/dev/null) || {
+    echo "  unavailable — the modem did not answer." >&2
+    return 0
+  }
+
+  # Per-RAT blocks: a heading, then indented "NAME: 'value'" lines. Values the
+  # modem has no reading for come back as n/a and are dropped.
+  # Per-RAT blocks: a heading, then indented "NAME: 'value'" lines. A RAT the
+  # modem is not on reports every value as n/a, so the heading is held back
+  # until something under it is worth printing.
+  local line name val pending=""
+  while IFS= read -r line; do
+    case $line in
+    *:\ \'*)
+      name=${line%%:*}
+      name=${name//[[:space:]]/}
+      val=${line#*\'}
+      val=${val%\'*}
+      [[ $val == n/a ]] && continue
+      [[ -n $pending ]] && { printf '  %s\n' "$pending"; pending=""; }
+      printf '    %-6s %s\n' "$name" "$val"
+      ;;
+    *:)
+      pending=${line//[[:space:]]/}
+      ;;
+    esac
+  done <<<"$(sed -n '2,$p' <<<"$out")"
+}
+
 # SIM lock state and the operations that clear it. ModemManager exposes these
 # on the SIM object and the bus policy allows them, so none of this needs a
 # privilege or a prompt. PIN= in cellular.conf is what unlocks the card
@@ -2771,6 +2832,7 @@ sim) cmd_sim "${2:-}" "${3:-}" ;;
 profile) cmd_profile "${2:-}" "${3:-}" "${4:-}" ;;
 at) cmd_at "${2:-}" ;;
 pin) cmd_pin "${2:-}" "${3:-}" "${4:-}" ;;
+signal) cmd_signal ;;
 esim-session) cmd_esim_session ;;
 mode) cmd_mode "${2:-}" ;;
 identify) cmd_identify ;;
@@ -2817,6 +2879,7 @@ usage: omarchy-cellular <command>
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
+  signal              every metric the modem reports, RSRQ included
   pin ...             SIM lock: status, unlock, puk, on|off, change
   at '<command>'      send one AT command, print the reply (diagnostics)
   profile ...         eSIM profiles: list, enable, delete, nickname, download, scan
