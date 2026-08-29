@@ -28,19 +28,18 @@ ln -sf ~/.config/omarchy/plugins/relctx.cellular/bin/omarchy-cellular ~/.local/b
 
 Omarchy 4.0 (quattro) or newer. The widget targets the Quickshell-based omarchy-shell.
 
-eSIM profile management needs `lpac`, and scanning a QR code needs `zbar`:
+eSIM profile management needs lpac built with the `mbim` driver — the `lpac-git`
+package is, the stock `lpac` package is not:
 
 ```sh
-yay -S lpac
-omarchy pkg add zbar
+yay -S lpac-git
+omarchy pkg add zbar        # QR scan; codes can still be typed without it
+omarchy pkg add libqmi      # optional: qmicli, for `cells` diagnostics
 ```
 
-`lpac` is a Local Profile Assistant. It talks to the eUICC over the modem's MBIM port,
-which ModemManager keeps open, and implements the list, switch, rename, delete and
-install operations. It must be built with the `mbim` driver: the `lpac-git` package is,
-the `lpac` package is not. `zbar` decodes a QR
-code captured from the screen. Without `zbar`, activation codes can still be typed in.
-`omarchy-cellular doctor` reports which are installed.
+`lpac` talks to the eUICC over the modem's MBIM port, which ModemManager keeps open,
+so eSIM operations do not interrupt the connection. `omarchy-cellular doctor` reports
+what is installed.
 
 ## Hardware
 
@@ -58,21 +57,27 @@ the USB device to force a re-probe, and returns early on PCIe, where there is no
 The bar icon opens the control panel. Right-click toggles cellular, middle-click
 refreshes.
 
-- **Connect switch**, with operator, access technology and status.
-- **Connection stats**: signal, RSSI, RSRP, RSRQ, SNR, ping and packet loss measured over
-  the modem link, throughput, session totals and IP. Click a value to copy it.
-- **Prioritize mobile**, **Metered** and **Autoconnect** switches.
-- **Data usage**: progress bar, next reset date, and a *Change* button holding the limit,
-  the period and a reset.
-- **Radio mode**: auto, 5G, 4G or 3G.
-- **APN**: detect from SIM, select country, carrier and APN, or type one.
-- **Device**: modem, firmware, IMEI, ICCID and EID, masked until revealed.
-- **SIM card**: physical or eSIM slot, and eSIM profile management. Click a profile to
-  switch to it, use the chips to rename or delete it, and *Add profile* to install one from
-  an activation code or a QR code on screen.
+The panel is event-driven: ModemManager and NetworkManager signals update it as they
+happen, and a SIM switch narrates its stages instead of holding one spinner.
 
-Reading the eUICC stops the modem, so profile operations ask for authorization and the
-connection drops and comes back.
+- **Connect switch**, operator, technology, status.
+- **Connection stats**: signal metrics colored at their 3GPP thresholds, ping, packet
+  loss, throughput, totals, IP. Click a value to copy it. A signal sparkline plots the
+  last five minutes.
+- **Active identity**: which card, which APN, at a glance.
+- **Data usage**: per-card meter with the calendar's position ticked on the bar, the
+  counting start stamped, and cutoff as a switch.
+- **Radio mode**: auto, 5G, 4G, 3G.
+- **Management chips**: Device details, SIM cards, APN and carrier, cell diagnostics —
+  one box open at a time.
+- **SIM cards**: every identity the modem can be — the physical card and each eSIM
+  profile — as tiles; one click switches, whatever that takes underneath. eSIM
+  management lists profiles by ICCID with rename, delete and install.
+- **Cell diagnostics**: read on demand — every carrier in use (primary and secondaries
+  with their widths, carrier aggregation totalled) and every cell the radio hears.
+
+eSIM operations run over MBIM with the connection up. One authorization covers a whole
+management session.
 
 ## Commands
 
@@ -82,7 +87,9 @@ omarchy-cellular connect|disconnect  bring cellular up or down
 omarchy-cellular toggle
 omarchy-cellular restart             reconnect
 omarchy-cellular mode [auto|5g|4g|3g]
-omarchy-cellular sim [1|2]           physical card (1) or eSIM (2); bare: show config
+omarchy-cellular sims                every card this modem can be
+omarchy-cellular use <iccid>         become one: slot switch, profile enable, or both
+omarchy-cellular sim [<n>|physical|esim]
 omarchy-cellular profile list        profiles on the eSIM
 omarchy-cellular profile enable|delete|nickname <iccid> [name]
 omarchy-cellular profile download <activation-code>
@@ -90,7 +97,11 @@ omarchy-cellular profile scan        install from a QR code on screen
 omarchy-cellular carrier ...         carrier and APN selection
 omarchy-cellular limit ...           data cap with auto-cutoff
 omarchy-cellular apn <name>          set the APN
-omarchy-cellular apn list            APNs the carrier provisioned into the modem
+omarchy-cellular apn list            APNs on the carrier's bearers
+omarchy-cellular pin ...             SIM lock: status, unlock, puk, on|off, change
+omarchy-cellular signal              every metric the modem reports, RSRQ included
+omarchy-cellular cells               carriers in use and every cell heard
+omarchy-cellular code '<*code#>'     carrier code in-band (USSD; dialed on CDMA)
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
 omarchy-cellular metered [yes|no]      whether this connection costs money
@@ -101,8 +112,6 @@ omarchy-cellular log
 omarchy-cellular doctor              check the setup
 ```
 
-`disconnect` uses rfkill, and systemd-rfkill persists that across reboots, so cellular
-stays off until the next `connect`.
 
 ## Carrier and APN
 
@@ -121,6 +130,13 @@ omarchy-cellular apply
 
 Username and password are applied for carriers that need them.
 
+## Per-card configuration
+
+APN, credentials, PIN, operator and the data plan belong to a card, not the machine.
+They live in `~/.config/omarchy/cellular.d/<iccid>.conf`, seeded from detect the first
+time a card is seen and applied automatically when the active card changes.
+`cellular.conf` keeps machine-wide settings.
+
 ## Data limit
 
 A monthly, daily or fixed-length cap with an automatic cutoff. Prepaid bundles sold as
@@ -138,13 +154,15 @@ omarchy-cellular limit reset               # zero the counter; on days, restart 
 omarchy-cellular limit off                 # disable the cutoff, keep tracking usage
 ```
 
-Usage accumulates from the interface byte counters into
-`~/.local/state/omarchy-cellular/usage`, and survives reboots, suspend and interface
-re-creation. At the limit, cellular disconnects and a notification is sent.
-Reconnecting by hand suppresses the cutoff until the period renews.
+Each card runs its own meter against its own plan, accumulated from the interface byte
+counters into `~/.local/state/omarchy-cellular/usage.<iccid>`; a delta whose interval
+straddled a card switch credits the card that was active. Counters survive reboots,
+suspend and interface re-creation. At the limit, cellular disconnects with a
+notification; reconnecting by hand — or `limit cutoff off` — suppresses the cutoff
+until the period renews.
 
-The meter updates on the bar's status poll, roughly every 10 seconds, so a cutoff can
-overshoot by whatever transfers in that time.
+The meter samples on panel updates, which the event feed drives; a cutoff can overshoot
+by whatever transfers between samples.
 
 ## Route metrics
 
@@ -175,22 +193,24 @@ omarchy-cellular metered         # what is configured, and what NetworkManager h
 
 ## Permissions
 
-Nothing is granted at install time, and normal operation does not prompt. Three operations
-use `pkexec` when reached:
+Nothing is granted at install time, and normal operation does not prompt. Four
+operations use `pkexec` when reached:
 
 1. Switching SIM slots. See Notes.
-2. Reading or changing eSIM profiles. One authorization covers a whole session: the
+2. eSIM profile operations. One authorization covers a whole management session; the
    connection stays up and nothing is stopped.
-3. Recovering a control port lost across suspend, when the port is gone.
+3. Cell diagnostics: one authorization reads carriers, aggregation and neighbours.
+4. Recovering a control port lost across suspend, when the port is gone.
 
 ## Installed files
 
 | Path | Contents |
 | --- | --- |
 | `~/.config/omarchy/plugins/relctx.cellular/` | bar widget, panel and CLI |
-| `~/.config/omarchy/cellular.conf` | APN, SIM slot, PIN, route metric |
+| `~/.config/omarchy/cellular.conf` | machine-wide settings |
+| `~/.config/omarchy/cellular.d/` | per-card APN, PIN, data plan |
 | `~/.config/omarchy/shell.json` | widget entry in `bar.layout` |
-| `~/.local/state/omarchy-cellular/usage` | data-limit meter state |
+| `~/.local/state/omarchy-cellular/` | per-card usage meters, caches |
 | `~/.local/bin/omarchy-cellular` | optional symlink |
 
 The connection is a NetworkManager `gsm` profile named `Omarchy Cellular`, overridable with
@@ -202,8 +222,9 @@ The connection is a NetworkManager `gsm` profile named `Omarchy Cellular`, overr
 omarchy plugin remove relctx.cellular
 nmcli connection delete "Omarchy Cellular"
 rm -f ~/.local/bin/omarchy-cellular
-rm -f ~/.config/omarchy/cellular.conf     # settings, including any SIM PIN
-rm -rf ~/.local/state/omarchy-cellular    # usage meter
+rm -f ~/.config/omarchy/cellular.conf     # machine-wide settings
+rm -rf ~/.config/omarchy/cellular.d       # per-card settings, including any SIM PIN
+rm -rf ~/.local/state/omarchy-cellular    # usage meters
 ```
 
 ModemManager and NetworkManager are left unmodified.
