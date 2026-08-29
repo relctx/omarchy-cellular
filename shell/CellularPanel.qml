@@ -322,7 +322,9 @@ Panel {
   // is the slot whose SIM reports an EID. The other one is the physical card.
   readonly property string esimSlot: info.esim_slot || "2"
   readonly property bool hasEsim: (info.esim_slot || "") !== ""
-  readonly property bool esimSelected: info.slot === esimSlot
+  // The modem's report of the active slot outranks the configured one; the
+  // config can lag a switch made through a profile enable.
+  readonly property bool esimSelected: (info.active_slot || info.slot) === esimSlot
   readonly property string physicalSlot: esimSlot === "1" ? "2" : "1"
   function slotHasCard(slot) { return info["slot" + slot + "_sim"] !== "no" }
   readonly property real usedFraction: limitBytes > 0 ? Math.min(1, usedBytes / limitBytes) : 0
@@ -1575,7 +1577,7 @@ Panel {
 
             PanelSectionHeader {
               id: simHeader
-              text: "SIM CARD"
+              text: "SIM CARD SELECTION"
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
               foreground: root.barForeground
@@ -1591,9 +1593,10 @@ Panel {
               width: Math.max(0, parent.width - simHeader.implicitWidth - Style.space(10))
               horizontalAlignment: Text.AlignRight
               elide: Text.ElideRight
-              text: root.simLabel
+              text: ""
+              visible: false
               color: root.barForeground
-              opacity: text === "" ? 0 : 0.6
+              opacity: 0
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -1623,8 +1626,7 @@ Column {
                 active: isActive
                 foreground: root.barForeground
                 fontFamily: root.fontFamily
-                tooltipText: isActive ? "The card in use"
-                                      : "Switch to this card — reconnects the modem"
+                tooltipText: isActive ? "" : "Switch to this card; the modem reconnects"
                 onClicked: if (!isActive) root.runAction([root.cli, "use", modelData.iccid])
               }
             }
@@ -1679,7 +1681,7 @@ Column {
                 PanelToolTip {
                   visible: manageArea.containsMouse
                   text: root.esimSelected
-                        ? "Rename, add, remove profiles — one authorization"
+                        ? "Rename, add, or remove eSIM profiles"
                         : "Select the eSIM first to manage its profiles"
                   fontFamily: root.fontFamily
                 }
