@@ -961,6 +961,86 @@ read_details() {
 
 # `mode` with no argument prints the current allowed set; with arguments it sets
 # them. "auto" means every mode the modem supports, preferring the fastest.
+# The modem's AT port, found by function: the kernel labels wwan ports in
+# /sys/class/wwan, and older USB modems predating that subsystem expose tty
+# nodes only ModemManager can identify.
+at_port() {
+  # The kernel labels wwan ports by function, so ask rather than guess at
+  # names: MHI parts expose wwan0at0, others number differently.
+  local d n
+  for d in /sys/class/wwan/*/; do
+    [[ -r $d/type ]] || continue
+    [[ $(cat "$d/type" 2>/dev/null) == AT ]] || continue
+    n=$(basename "$d")
+    [[ -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  done
+
+  # Older USB modems predate the wwan subsystem and expose tty nodes. Which
+  # ttyUSB carries AT varies per device, so take ModemManager's word for it.
+  local idx
+  idx=$(modem_index) || return 1
+  [[ -n $idx ]] || return 1
+  n=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (at)$|\1|p' <<<"$(modem_dump "$idx")" | head -1)
+  [[ -n $n && -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  return 1
+}
+
+# Send one AT command and print the reply. An escape hatch for diagnostics,
+# and deliberately not used by anything else here: the port has to be taken
+# from ModemManager for the duration, which upsets a modem mid-operation, and
+# a state-changing command leaves ModemManager believing something untrue.
+#
+# Ones worth knowing:
+#   ATI                     model and firmware
+#   AT+CSQ                  signal strength, raw
+#   AT+COPS?                registered operator
+#   AT+CPIN?                SIM lock state
+#   AT+CGDCONT?             the modem's PDP context table, which MBIM does not expose
+#   AT+CGACT?               which of those contexts are active
+#   AT+CEREG?               LTE registration state
+#   AT+C5GREG?              5G registration state
+#   AT+CFUN?                radio power state
+#   AT+QNWINFO              band and channel (Quectel)
+#   AT+QENG="servingcell"   serving cell detail (Quectel)
+cmd_at() {
+  local idx dump port
+  [[ -n ${1:-} ]] || {
+    echo "usage: omarchy-cellular at '<command>'    e.g. omarchy-cellular at 'AT+CSQ'" >&2
+    return 2
+  }
+  idx=$(modem_index_wait)
+  [[ -n $idx ]] || {
+    echo "No modem detected." >&2
+    return 1
+  }
+  port=$(at_port) || {
+    echo "This modem exposes no AT port." >&2
+    return 1
+  }
+  # Taking the port from ModemManager drops a live connection more often than
+  # not. Say so rather than let it look like a fault.
+  nm_is_active && echo "Taking the AT port from ModemManager; cellular may drop." >&2
+  # `timeout cat` always exits non-zero: the port never closes, so it is the
+  # timeout that ends the read. Succeed on having an answer instead.
+  # Leading/trailing whitespace makes the modem reject the line outright.
+  local want="${1#"${1%%[![:space:]]*}"}"
+  want="${want%"${want##*[![:space:]]}"}"
+
+  dev_node_ok "$port" || {
+    echo "Refusing to use $port: not a character device under /dev." >&2
+    return 1
+  }
+  local out
+  out=$(pkexec sh -c 'exec 3<>"$1"; printf "%s\r" "$2" >&3; timeout 3 cat <&3' \
+    sh "$port" "$want")
+  [[ -n $out ]] || {
+    echo "No answer from the modem. It may not support that command," >&2
+    echo "or ModemManager had the port busy. Try again, or check syntax." >&2
+    return 1
+  }
+  printf '%s\n' "$out"
+}
+
 # What this SIM is provisioned with and what the modem is using, from
 # ModemManager. The initial EPS bearer is the carrier's own setting, attached
 # at registration; the bearers are what has actually been dialled. A modem that
@@ -2555,6 +2635,7 @@ prefer)
   ;;
 sim) cmd_sim "${2:-}" "${3:-}" ;;
 profile) cmd_profile "${2:-}" "${3:-}" "${4:-}" ;;
+at) cmd_at "${2:-}" ;;
 esim-session) cmd_esim_session ;;
 mode) cmd_mode "${2:-}" ;;
 identify) cmd_identify ;;
@@ -2601,6 +2682,7 @@ usage: omarchy-cellular <command>
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
+  at '<command>'      send one AT command, print the reply (diagnostics)
   profile ...         eSIM profiles: list, enable, delete, nickname, download, scan
   esim-session        one authorization, then profile commands on stdin (the panel)
   carrier ...         pick country/carrier and apply its APN (see: carrier)
