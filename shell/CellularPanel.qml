@@ -66,8 +66,9 @@ Panel {
 
   function sessionStart() {
     if (sessionProc.running) return
+    // The queue is the callers': the click that starts the session has
+    // usually just queued the command the session exists to run.
     root.sessionReady = false
-    root.sessionQueue = []
     root.sessionVerb = ""
     root.sessionLines = []
     sessionProc.command = [root.cli, "esim-session"]
