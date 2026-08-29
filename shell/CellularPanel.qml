@@ -325,6 +325,52 @@ Panel {
   property string smsOpen: ""
   function loadSms() { if (!smsProc.running) smsProc.running = true }
 
+  // Carrier browser: the provider database, staged country -> carrier ->
+  // APN, all unprivileged reads of the shipped database.
+  property bool apnBrowse: false
+  property string browseCc: ""
+  property string browseCcName: ""
+  property string browseProv: ""
+  property var browseRows: []
+
+  function browseLoad() {
+    browseRows = []
+    var cmd = [cli, "carrier", "list"]
+    if (browseCc !== "") cmd.push(browseCc)
+    if (browseProv !== "") cmd.push(browseProv)
+    browseProc.running = false
+    browseProc.command = cmd
+    browseProc.running = true
+  }
+
+  // Runs in root scope: a row click rebuilds the list model, which destroys
+  // the delegate whose handler is still executing — state changes made there
+  // are lost mid-statement. The delegate hands its row here and does nothing
+  // else.
+  function browsePick(m) {
+    browseFilter.text = ""
+    if (m.kind === "back") {
+      if (browseProv !== "") browseProv = ""
+      else { browseCc = ""; browseCcName = "" }
+      browseLoad()
+    } else if (m.kind === "country") {
+      browseCc = m.c0
+      browseCcName = m.label
+      browseLoad()
+    } else if (m.kind === "provider") {
+      browseProv = m.c0
+      browseLoad()
+    } else {
+      apnBrowse = false
+      runAction(["sh", "-c",
+        JSON.stringify(cli) + " carrier set "
+        + JSON.stringify(browseCc) + " "
+        + JSON.stringify(browseProv) + " "
+        + JSON.stringify(m.c0)
+        + " && " + JSON.stringify(cli) + " apply"])
+    }
+  }
+
   // Diagnostics: read on demand behind one authorization, never polled.
   property var diagCells: []
   property var diagServing: ({})
@@ -834,6 +880,22 @@ Panel {
   }
 
   Process { id: notifyProc }
+
+  Process {
+    id: browseProc
+    stdout: StdioCollector { id: browseOut; waitForEnd: true }
+    onExited: function (code) {
+      if (code !== 0) return
+      var out = []
+      var lines = (browseOut.text || "").split("\n")
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i] === "") continue
+        var c = lines[i].split("\t")
+        out.push({ c0: c[0] || "", c1: c[1] || "", c2: c[2] || "", c3: c[3] || "" })
+      }
+      root.browseRows = out
+    }
+  }
 
   Process {
     id: diagProc
@@ -2349,9 +2411,20 @@ Panel {
               text: "Lookup"
               tooltipText: "Find your carrier's APN in the provider database"
               bordered: true
+              active: root.apnBrowse
               foreground: root.barForeground
               fontFamily: root.fontFamily
-              onClicked: root.runDetached(root.cli + " carrier choose")
+              onClicked: {
+                root.apnBrowse = !root.apnBrowse
+                if (root.apnBrowse) {
+                  root.browseCc = ""
+                  root.browseCcName = ""
+                  root.browseProv = ""
+                  browseFilter.text = ""
+                  root.browseLoad()
+                  browseFilter.forceActiveFocus()
+                }
+              }
             }
 
             Button {
@@ -2373,6 +2446,112 @@ Panel {
               }
             }
 
+          }
+
+          // The provider database, staged in place: countries, then the
+          // country's carriers, then that carrier's APNs; a tap applies.
+          Item {
+            width: parent.width
+            clip: true
+            height: (root.carrierExpanded && root.apnBrowse) ? browseCol.implicitHeight : 0
+            Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+
+            Column {
+              id: browseCol
+              width: parent.width
+              spacing: Style.space(4)
+
+              TextField {
+                id: browseFilter
+                width: parent.width
+                font.pixelSize: Style.font.caption
+                verticalPadding: Style.space(2)
+                placeholderText: root.browseProv !== "" ? root.browseProv + " APNs"
+                                 : root.browseCc !== "" ? "Filter carriers in " + root.browseCcName
+                                 : "Filter countries"
+                foreground: root.barForeground
+              }
+
+              ListView {
+                id: browseList
+                width: parent.width
+                height: Math.min(contentHeight, Style.space(180))
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+                spacing: Style.space(1)
+
+                model: {
+                  var out = []
+                  if (root.browseCc !== "")
+                    out.push({ kind: "back",
+                               label: "‹  " + (root.browseProv !== "" ? root.browseCcName : "Countries"),
+                               sub: "" })
+                  var f = browseFilter.text.toLowerCase()
+                  for (var i = 0; i < root.browseRows.length; i++) {
+                    var r = root.browseRows[i]
+                    var kind = root.browseProv !== "" ? "apn"
+                             : root.browseCc !== "" ? "provider" : "country"
+                    var label = kind === "country" ? r.c1 : r.c0
+                    var sub = kind === "country" ? r.c0 : kind === "apn" ? r.c1 : ""
+                    if (f !== "" && (label + " " + sub).toLowerCase().indexOf(f) === -1) continue
+                    out.push({ kind: kind, label: label, sub: sub, c0: r.c0 })
+                  }
+                  return out
+                }
+
+                delegate: Item {
+                  id: browseRow
+                  required property var modelData
+                  width: browseList.width
+                  height: browseLabel.implicitHeight + Style.space(4)
+
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Style.cornerRadius
+                    color: root.barForeground
+                    opacity: browseRowArea.containsMouse ? 0.08 : 0
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: browseLabel
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(3)
+                    anchors.right: browseSub.left
+                    anchors.rightMargin: Style.space(4)
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    text: browseRow.modelData.label
+                    color: root.barForeground
+                    opacity: browseRow.modelData.kind === "back" ? 0.6 : 0.85
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: browseSub
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(3)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: browseRow.modelData.sub
+                    color: root.barForeground
+                    opacity: 0.4
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: browseRowArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.browsePick(browseRow.modelData)
+                  }
+                }
+              }
+            }
           }
 
           // Inline; the panel already takes keyboard focus for its own
