@@ -405,10 +405,9 @@ modem_index() {
   local f="$CACHE_DIR/index"
   [[ -s $f ]] || {
     mkdir -p "$CACHE_DIR"
-    # busctl, not mmcli: listing modems through libmm-glib dereferences an
-    # object that has no Modem interface while one is being rebuilt, and takes
-    # SIGSEGV for it. This runs on every poll, so that is a coredump per poll
-    # for as long as the modem is re-initialising.
+    # `mmcli -L` works, but prints a libmm-glib runtime-check warning while a
+    # modem is being rebuilt. The bus answers the same question exactly and
+    # without spawning the client. See sim_property for the worse case.
     busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
       sed -n 's|.*/Modem/\([0-9]\{1,\}\)$|\1|p' | head -1 >"$f"
   }
@@ -925,10 +924,8 @@ read_details() {
   local simpath
   simpath=$(kv "$dump" modem.generic.sim | sed 's|.*/SIM/||')
   if [[ -n $simpath ]]; then
-    # Read the SIM over D-Bus, not mmcli: `mmcli -i` dereferences the parent
-    # modem without a NULL check and segfaults on a read landing while the
-    # object is set up or torn down. On a 10s poll that is a coredump
-    # notification every 10 seconds. busctl returns an error instead.
+    # Read the SIM over D-Bus. `mmcli -i` cannot do it at all here: see
+    # sim_property.
     local sim_dbus="/org/freedesktop/ModemManager1/SIM/$simpath"
     simprop() {
       busctl get-property org.freedesktop.ModemManager1 "$sim_dbus" \
@@ -1032,11 +1029,10 @@ cmd_apn_list() {
   echo "* = currently configured.  Set one with: omarchy-cellular apn <name>"
 }
 
-# Refill the identifiers ModemManager cannot read. `mmcli -i` segfaults on some
-# SIM objects, and the eUICC here is one, so ICCID comes from the modem over AT
-# instead. Both values are immutable, so this is a one-off per SIM rather than
-# anything the panel should be doing on a poll -- hence a command you run, not
-# a background fetch that would prompt for pkexec every ten seconds.
+# Print the card's identifiers. ModemManager has both on the SIM object and
+# they are read from the bus; the eUICC is asked only for an EID ModemManager
+# does not have, which costs an authorization, so this is a command you run
+# rather than anything the panel does on a poll.
 cmd_identify() {
   local idx dump simpath out iccid
   idx=$(modem_index_wait)
@@ -1666,9 +1662,16 @@ esim_run() {
   return 0
 }
 
-# One property off a SIM object, over the bus. mmcli -i takes SIGSEGV when the
-# object is being rebuilt, and SIM objects are rebuilt on every slot switch and
-# every profile change, so nothing that runs on a poll may use it.
+# One property off a SIM object, over the bus, because `mmcli -i` is broken:
+# on ModemManager 1.24.2 it exits 139 every time, for a physical card and an
+# eUICC alike, addressed by index or by full object path, with the modem
+# settled -- it dereferences the SIM's parent modem object and segfaults.
+#
+#   mm_object_get_modem: runtime check failed: (MM_IS_MODEM (modem))
+#
+# `mmcli -m` on the same daemon is fine, so this is the client's SIM path and
+# not the daemon: everything below is present and correct on the bus. Reading
+# it any other way returns nothing and dumps core.
 sim_property() {
   local path=$1 name=$2
   [[ $path == /org/freedesktop/ModemManager1/SIM/* ]] || return 1
