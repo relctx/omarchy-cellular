@@ -1978,7 +1978,7 @@ activation_code_ok() {
 #
 # Reads commands on stdin, one per line. Writes each answer followed by a
 # terminator line, so the caller knows where one answer ends.
-ESIM_SESSION_IDLE=180
+: "${ESIM_SESSION_IDLE:=180}"
 
 cmd_esim_session() {
   profile_precheck || return 1
@@ -2031,6 +2031,10 @@ cmd_esim_session() {
     ' sh "$dev" "$slot" "$ESIM_SESSION_IDLE"
   } 2>/dev/null
 
+  # A write to the privileged half after it exits would otherwise kill this
+  # process outright, silently, before the expiry branch below can answer.
+  trap '' PIPE
+
   # Tell the caller the authorization is done and the session is live, so a
   # panel can stop showing a prompt-pending state.
   printf 'session=ready\n'
@@ -2074,20 +2078,43 @@ cmd_esim_session() {
       ;;
     esac
 
-    printf '%s\n' "$line" >&"${PRIV[1]}"
+    # The coproc's variables vanish when it exits, so probe liveness first;
+    # the write guard catches the race where it dies in between.
+    if [[ -z ${PRIV_PID:-} ]] || ! kill -0 "$PRIV_PID" 2>/dev/null ||
+      ! printf '%s\n' "$line" >&"${PRIV[1]}" 2>/dev/null; then
+      printf 'error=session expired\n===END 70===\n'
+      break
+    fi
 
     # Read the answer up to its terminator, then render it the way the
-    # one-shot commands do.
-    local json="" chunk rc=0
+    # one-shot commands do. EOF before the terminator means the privileged
+    # half is gone (idle timeout); end this half too, so the caller restarts
+    # a fresh session instead of feeding a dead one.
+    local json="" chunk rc=0 ended=0
     while IFS= read -r chunk <&"${PRIV[0]}"; do
       case $chunk in
-      "===END "*) rc=${chunk#===END }; rc=${rc%%===*}; break ;;
+      "===END "*)
+        rc=${chunk#===END }
+        rc=${rc%%===*}
+        ended=1
+        break
+        ;;
       *) json+="$chunk"$'\n' ;;
       esac
     done
+    if ((!ended)); then
+      printf 'error=session expired\n===END 70===\n'
+      break
+    fi
 
     if [[ $verb == list || $rc == 0 ]]; then
       profiles_render "$(printf '%s' "$json")" 2>/dev/null
+    fi
+    # A refusal carries lpac's reason; hand it on instead of a bare code.
+    if [[ $verb != list && $rc != 0 ]]; then
+      local why
+      why=$(jq -r '.payload.data // .payload.message // empty' <<<"$json" 2>/dev/null | head -1)
+      [[ -n $why ]] && printf 'error=%s\n' "$why"
     fi
 
     # A newly enabled profile is a different card; ModemManager has to be told
