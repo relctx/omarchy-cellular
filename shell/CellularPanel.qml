@@ -192,6 +192,49 @@ Panel {
   // The provider ModemManager reports for the card. No authorization, no cache.
   readonly property string simLabel: info.sim_operator || ""
 
+  // The published 3GPP quality tiers, as carrier field guides print them.
+  // A lookup table, not judgment: the label sits beside the number.
+  function sigTier(kind, raw) {
+    var v = parseFloat(raw)
+    if (isNaN(v)) return ""
+    if (kind === "rsrp")
+      return v >= -80 ? "excellent" : v >= -90 ? "good" : v >= -100 ? "fair"
+           : v >= -110 ? "poor" : "cell edge"
+    if (kind === "rsrq")
+      return v >= -10 ? "good" : v >= -15 ? "fair" : v >= -20 ? "poor" : "cell edge"
+    if (kind === "snr")
+      return v > 20 ? "excellent" : v >= 13 ? "good" : v >= 0 ? "fair" : "poor"
+    if (kind === "rssi")
+      return v >= -65 ? "excellent" : v >= -75 ? "good" : v >= -85 ? "fair"
+           : v >= -95 ? "poor" : "weak"
+    return ""
+  }
+  function sigWithTier(kind, raw) {
+    if (!raw) return "—"
+    var t = sigTier(kind, raw)
+    return t ? raw + "  ·  " + t : raw
+  }
+
+  // Strength history for the sparkline, fed by whatever updates the feed —
+  // events while closed, the stats cadence while open. Five minutes. RSRP
+  // when the modem reports it, RSSI when that is all there is; the two never
+  // share a line, so a metric change restarts the history.
+  property var rsrpHistory: []
+  property string sparkMetric: ""
+  function recordStrength(rsrp, rssi) {
+    var metric = rsrp ? "RSRP" : rssi ? "RSSI" : ""
+    if (metric === "") return
+    var v = parseFloat(metric === "RSRP" ? rsrp : rssi)
+    if (isNaN(v)) return
+    var now = Date.now()
+    var h = sparkMetric === metric ? rsrpHistory.slice() : []
+    sparkMetric = metric
+    if (h.length > 0 && now - h[h.length - 1].t < 2000) return
+    h.push({ t: now, v: v })
+    while (h.length > 0 && now - h[0].t > 300000) h.shift()
+    rsrpHistory = h
+  }
+
   // Which management box is open: "", "device", "sim" or "apn". One at a
   // time; the chip row at the bottom drives it.
   property string mgmtView: ""
@@ -283,6 +326,10 @@ Panel {
   // state, which during a connect reads as if nothing happened.
   property string busyLabel: ""
   property string busyVerb: ""
+  // The last failed action's own words, shown where the chips are until the
+  // next action clears it. The CLI already notifies; this is for the panel
+  // that was open when it happened.
+  property string lastError: ""
   function maskId(v) {
     if (!v) return "—"
     return detailsRevealed ? v : v.slice(0, 4) + "•".repeat(Math.max(0, v.length - 4))
@@ -390,6 +437,7 @@ Panel {
     updateStats(next)
     info = next
     sims = parseIndexed(raw, "sim")
+    recordStrength(next.sig_rsrp, next.sig_rssi)
   }
 
   function updateStats(next) {
@@ -486,6 +534,7 @@ Panel {
   // their own input can keep it instead of dropping it on the floor.
   function runAction(cmd) {
     if (actionProc.running) return false
+    root.lastError = ""
     root.busyLabel = root.labelFor(cmd)
     root.busyVerb = cmd[1] === "sh" ? "" : (cmd[1] || "")
     actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
@@ -554,6 +603,8 @@ Panel {
       if (code !== 0 && root.profilesUndo.length > 0) {
         root.profiles = root.profilesUndo
         root.profileError = (actionErr.text || "").trim() || "That did not work."
+      } else if (code !== 0) {
+        root.lastError = (actionErr.text || "").trim().split("\n")[0] || "That did not work."
       } else if (code === 0) {
         // A profile command returns the refreshed list from inside the same
         // authorization. When it does, it replaces the optimistic guess and
@@ -778,8 +829,8 @@ Panel {
             spacing: Style.spacing.labelGap
             InfoPair { label: "Operator"; value: root.info.operator || "—" }
             InfoPair { label: "Signal"; value: (root.info.signal || "0") + "%" }
-            InfoPair { label: "RSSI"; value: root.info.sig_rssi || "—" }
-            InfoPair { label: "RSRQ"; value: root.info.sig_rsrq || "—" }
+            InfoPair { label: "RSSI"; value: root.sigWithTier("rssi", root.info.sig_rssi) }
+            InfoPair { label: "RSRQ"; value: root.sigWithTier("rsrq", root.info.sig_rsrq) }
             InfoPair {
               label: "Ping"
               value: root.formatPing(root.pingLatency)
@@ -799,8 +850,8 @@ Panel {
               value: root.roaming ? "Yes" : "No"
               valueColor: root.roaming ? root.urgent : root.barForeground
             }
-            InfoPair { label: "RSRP"; value: root.info.sig_rsrp || "—" }
-            InfoPair { label: "SNR"; value: root.info.sig_snr || "—" }
+            InfoPair { label: "RSRP"; value: root.sigWithTier("rsrp", root.info.sig_rsrp) }
+            InfoPair { label: "SNR"; value: root.sigWithTier("snr", root.info.sig_snr) }
             InfoPair {
               label: "Packet Loss"
               value: root.formatLoss(root.packetLoss)
@@ -808,6 +859,129 @@ Panel {
             }
             InfoPair { label: "Sending"; value: root.hasTransferStats ? root.formatRate(root.uploadRate) : "--" }
             InfoPair { label: "Uploaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.tx_bytes || "0")) : "--" }
+          }
+        }
+
+        // RSRP over the last five minutes: a thin line that answers what the
+        // instantaneous number cannot — is it degrading, and did moving help.
+        Column {
+          visible: root.hwPresent && root.rsrpHistory.length >= 2
+          width: parent.width
+          spacing: Style.space(2)
+
+          readonly property real histLo: {
+            var h = root.rsrpHistory
+            if (h.length === 0) return 0
+            var lo = h[0].v
+            for (var i = 1; i < h.length; i++) if (h[i].v < lo) lo = h[i].v
+            return lo
+          }
+          readonly property real histHi: {
+            var h = root.rsrpHistory
+            if (h.length === 0) return 0
+            var hi = h[0].v
+            for (var i = 1; i < h.length; i++) if (h[i].v > hi) hi = h[i].v
+            return hi
+          }
+
+          Item {
+            width: parent.width
+            implicitHeight: sparkTitle.implicitHeight
+
+            Text {
+              textFormat: Text.PlainText
+              id: sparkTitle
+              anchors.left: parent.left
+              text: (root.sparkMetric || "RSRP") + " · LAST 5 MIN"
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.baseline: sparkTitle.baseline
+              text: {
+                var h = root.rsrpHistory
+                if (h.length === 0) return ""
+                var sum = 0
+                for (var i = 0; i < h.length; i++) sum += h[i].v
+                return "avg " + (sum / h.length).toFixed(0) + " dBm"
+              }
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Item {
+            width: parent.width
+            height: Style.space(28)
+
+            // A quiet ground so the chart reads as a chart, in theme tones.
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.04)
+              border.color: root.barForeground
+              border.width: 1
+              opacity: 0.5
+            }
+
+            Canvas {
+              id: rsrpSpark
+              anchors.fill: parent
+              anchors.margins: 3
+              property var pts: root.rsrpHistory
+              // The theme's accent is the pen; everything else stays neutral.
+              property color line: Color.accent
+              onPtsChanged: requestPaint()
+              onLineChanged: requestPaint()
+              onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var h = pts
+                if (!h || h.length < 2) return
+                // Autoscaled to the window: the deltas are the point, so
+                // whatever movement exists fills the height. Only a 1 dB
+                // guard against a degenerate flat window.
+                var lo = parent.parent.histLo, hi = parent.parent.histHi
+                if (hi - lo < 1) { var mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5 }
+                var t0 = h[0].t, t1 = h[h.length - 1].t
+                var span = Math.max(1, t1 - t0)
+                // Soft fill under the line first, then the line itself.
+                ctx.beginPath()
+                for (var i = 0; i < h.length; i++) {
+                  var x = (h[i].t - t0) / span * (width - 2) + 1
+                  var y = height - 2 - (h[i].v - lo) / (hi - lo) * (height - 4)
+                  i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+                }
+                ctx.lineTo(x, height)
+                ctx.lineTo(1, height)
+                ctx.closePath()
+                ctx.fillStyle = Qt.rgba(line.r, line.g, line.b, 0.10)
+                ctx.fill()
+
+                ctx.strokeStyle = Qt.rgba(line.r, line.g, line.b, 0.9)
+                ctx.lineWidth = 1.5
+                ctx.beginPath()
+                for (i = 0; i < h.length; i++) {
+                  x = (h[i].t - t0) / span * (width - 2) + 1
+                  y = height - 2 - (h[i].v - lo) / (hi - lo) * (height - 4)
+                  i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+                }
+                ctx.stroke()
+                ctx.fillStyle = line
+                ctx.beginPath()
+                ctx.arc(x, y, 2, 0, Math.PI * 2)
+                ctx.fill()
+              }
+            }
+
           }
         }
 
@@ -1377,6 +1551,17 @@ Panel {
             fontFamily: root.fontFamily
             onClicked: root.toggleMgmt("apn")
           }
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          visible: root.lastError !== ""
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: root.lastError
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
 
         // ---------- APN (behind its chip) ----------
