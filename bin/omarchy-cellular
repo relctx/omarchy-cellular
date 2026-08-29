@@ -2603,6 +2603,7 @@ cmd_esim_session() {
         out="" rc=0
         case $verb in
         list) out=$(lpac profile list); rc=$? ;;
+        chipinfo) out=$(lpac chip info); rc=$? ;;
         enable) out=$(lpac profile enable "$rest" true); rc=$? ;;
         disable) out=$(lpac profile disable "$rest"); rc=$? ;;
         delete) out=$(lpac profile delete "$rest"); rc=$? ;;
@@ -2627,6 +2628,21 @@ cmd_esim_session() {
   # Tell the caller the authorization is done and the session is live, so a
   # panel can stop showing a prompt-pending state.
   printf 'session=ready\n'
+
+  # Free eUICC storage, once per session: the chip reports free bytes, and
+  # the spec exposes no per-profile sizes to break it down further. Sent and
+  # collected here, before the command loop, so responses stay in step.
+  if printf 'chipinfo\n' >&"${PRIV[1]}" 2>/dev/null; then
+    local ci_json="" ci_line
+    while IFS= read -r ci_line <&"${PRIV[0]}"; do
+      case $ci_line in
+      "===END "*) break ;;
+      *) ci_json+="$ci_line"$'\n' ;;
+      esac
+    done
+    jq -r '"euicc_free=\(.payload.data.EUICCInfo2.extCardResource.freeNonVolatileMemory // empty)"' \
+      <<<"$ci_json" 2>/dev/null | grep '=' || true
+  fi
 
   local line verb rest reply
   while IFS=' ' read -r verb rest; do

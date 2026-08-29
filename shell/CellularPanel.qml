@@ -105,6 +105,11 @@ Panel {
   }
 
   function sessionLine(line) {
+    if (line.indexOf("euicc_free=") === 0) {
+      var b = parseFloat(line.substring(11))
+      root.euiccFree = isNaN(b) || b <= 0 ? "" : root.formatBytes(b) + " free"
+      return
+    }
     if (line === "session=ready") {
       root.sessionReady = true
       root.sessionPump()
@@ -297,6 +302,7 @@ Panel {
 
   // Text messages: loaded when the box opens and when one arrives. The
   // Messaging.Added signal rides the same event feed as everything else.
+  property string euiccFree: ""
   property var smsList: []
   property var smsSeen: null
   property string smsOpen: ""
@@ -2502,10 +2508,12 @@ Panel {
                 id: manageArea
                 anchors.fill: parent
                 anchors.margins: -Style.space(4)
+                // Hover stays live while the control is unavailable, so the
+                // tooltip can say why; only the click is gated.
                 hoverEnabled: true
-                enabled: root.esimSelected
-                cursorShape: Qt.PointingHandCursor
+                cursorShape: root.esimSelected ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: {
+                  if (!root.esimSelected) return
                   root.esimExpanded = !root.esimExpanded
                   if (root.esimExpanded) root.loadProfiles()
                   else root.sessionStop()
@@ -2747,10 +2755,29 @@ Column {
 
               PanelSeparator { foreground: root.barForeground }
 
-              PanelSectionHeader {
-                text: "ESIM PROFILES"
-                foreground: root.barForeground
-                fontFamily: root.fontFamily
+              Item {
+                width: parent.width
+                implicitHeight: esimHeader.implicitHeight
+
+                PanelSectionHeader {
+                  id: esimHeader
+                  text: "ESIM PROFILES"
+                  foreground: root.barForeground
+                  fontFamily: root.fontFamily
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  visible: root.euiccFree !== ""
+                  anchors.right: parent.right
+                  anchors.verticalCenter: esimHeader.verticalCenter
+                  anchors.verticalCenterOffset: Math.round(esimHeader.topPadding / 2)
+                  text: root.euiccFree
+                  color: root.barForeground
+                  opacity: 0.5
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
               }
 
               Text {
