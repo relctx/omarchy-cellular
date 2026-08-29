@@ -1024,6 +1024,120 @@ Panel {
           }
         }
 
+        // ---------- Active identity ----------
+        PanelSeparator { foreground: root.barForeground }
+
+        // The active identity, presented like the card it is: glyph, name,
+        // ICCID tail, and the APN it rides on.
+        Item {
+          width: parent.width
+          implicitHeight: idCol.implicitHeight
+
+          readonly property var activeSim: {
+            for (var i = 0; i < root.sims.length; i++)
+              if (root.sims[i].active === "yes") return root.sims[i]
+            return null
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            id: idGlyph
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: parent.activeSim && parent.activeSim.kind === "esim" ? "󱤓" : "󰒧"
+            color: root.barForeground
+            opacity: 0.8
+            font.family: root.fontFamily
+            font.pixelSize: Math.round(Style.font.body * 1.6)
+          }
+
+          Column {
+            id: idCol
+            anchors.left: idGlyph.right
+            anchors.leftMargin: Style.space(8)
+            anchors.right: idTail.left
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              elide: Text.ElideRight
+              text: {
+                var a = idCol.parent.activeSim
+                return (a && (a.provider || a.name)) || root.simLabel || "No SIM"
+              }
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.weight: Font.DemiBold
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              elide: Text.ElideRight
+              text: "APN  " + (root.info.apn || "automatic")
+              color: root.barForeground
+              opacity: 0.55
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Column {
+            id: idTail
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              visible: text !== ""
+              text: {
+                var a = idTail.parent.activeSim
+                return a && a.provider && a.name && a.provider !== a.name ? a.name : ""
+              }
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              text: idTail.parent.activeSim
+                    ? "····" + String(idTail.parent.activeSim.iccid || "").slice(-4) : ""
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+
+        // Focus mode: opening a management box folds the midsection away,
+        // leaving the hero and identity as the basic strip with the chips
+        // risen beneath them. Closing unfolds it. Pure height animation; the
+        // sections inside are untouched.
+        Item {
+          clip: true
+          width: parent.width
+          height: root.mgmtView === "" ? midFoldA.implicitHeight : 0
+          opacity: root.mgmtView === "" ? 1 : 0
+          Behavior on height { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+          Behavior on opacity { NumberAnimation { duration: 150 } }
+
+          Column {
+            id: midFoldA
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            spacing: Style.space(14)
+
         // ---------- Connection stats ----------
         // Label/value pairs in two columns; ping rows turn urgent as soon as a
         // probe is lost.
@@ -1069,6 +1183,9 @@ Panel {
             }
             InfoPair { label: "Sending"; value: root.hasTransferStats ? root.formatRate(root.uploadRate) : "--" }
             InfoPair { label: "Uploaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.tx_bytes || "0")) : "--" }
+          }
+        }
+
           }
         }
 
@@ -1196,6 +1313,23 @@ Panel {
           }
         }
 
+        // The fold resumes below the sparkline; it and the strip above it
+        // stay through focus mode.
+        Item {
+          clip: true
+          width: parent.width
+          height: root.mgmtView === "" ? midFoldB.implicitHeight : 0
+          opacity: root.mgmtView === "" ? 1 : 0
+          Behavior on height { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+          Behavior on opacity { NumberAnimation { duration: 150 } }
+
+          Column {
+            id: midFoldB
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            spacing: Style.space(14)
+
         // ---------- Switches ----------
         // Header rows: settings you flip rarely and read often belong beside
         // their label.
@@ -1241,101 +1375,6 @@ Panel {
               : "Cellular stays down until you connect"
             onFlipped: root.runAction([root.cli, "autoconnect",
                                        root.info.autoconnect === "yes" ? "off" : "on"])
-          }
-        }
-
-        // ---------- Active identity ----------
-        PanelSeparator { foreground: root.barForeground }
-
-        // The active identity, presented like the card it is: glyph, name,
-        // ICCID tail, and the APN it rides on.
-        Item {
-          width: parent.width
-          implicitHeight: idCol.implicitHeight
-
-          readonly property var activeSim: {
-            for (var i = 0; i < root.sims.length; i++)
-              if (root.sims[i].active === "yes") return root.sims[i]
-            return null
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            id: idGlyph
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: parent.activeSim && parent.activeSim.kind === "esim" ? "󱤓" : "󰒧"
-            color: root.barForeground
-            opacity: 0.8
-            font.family: root.fontFamily
-            font.pixelSize: Math.round(Style.font.body * 1.6)
-          }
-
-          Column {
-            id: idCol
-            anchors.left: idGlyph.right
-            anchors.leftMargin: Style.space(8)
-            anchors.right: idTail.left
-            anchors.rightMargin: Style.space(4)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(1)
-
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              elide: Text.ElideRight
-              text: {
-                var a = idCol.parent.activeSim
-                return (a && (a.provider || a.name)) || root.simLabel || "No SIM"
-              }
-              color: root.barForeground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.weight: Font.DemiBold
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              elide: Text.ElideRight
-              text: "APN  " + (root.info.apn || "automatic")
-              color: root.barForeground
-              opacity: 0.55
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-          }
-
-          Column {
-            id: idTail
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(1)
-
-            Text {
-              textFormat: Text.PlainText
-              anchors.right: parent.right
-              visible: text !== ""
-              text: {
-                var a = idTail.parent.activeSim
-                return a && a.provider && a.name && a.provider !== a.name ? a.name : ""
-              }
-              color: root.barForeground
-              opacity: 0.5
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            Text {
-              textFormat: Text.PlainText
-              anchors.right: parent.right
-              text: idTail.parent.activeSim
-                    ? "····" + String(idTail.parent.activeSim.iccid || "").slice(-4) : ""
-              color: root.barForeground
-              opacity: 0.5
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
           }
         }
 
@@ -1707,6 +1746,9 @@ Panel {
                              root.runAction([root.cli, "mode", modelData.id])
               }
             }
+          }
+        }
+
           }
         }
 
