@@ -1804,6 +1804,7 @@ cmd_panel() {
   printf 'slot=%s\n' "$(get_cfg SIM_SLOT)"
   printf 'esim_transport=%s\n' "$(esim_transport)"
   printf 'esim_slot=%s\n' "$(esim_slot || true)"
+  cmd_sims 2>/dev/null
   printf 'apn=%s\n' "$(get_cfg APN)"
   printf 'metered=%s\n' "$(get_cfg METERED | grep . || echo yes)"
   printf 'prefer_cellular=%s\n' "$([[ $(get_cfg PREFER_CELLULAR) == yes ]] && echo yes || echo no)"

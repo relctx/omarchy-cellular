@@ -222,6 +222,25 @@ Panel {
     return st === "enabled" || st === "1" || st === "true"
   }
 
+  // The card list, parsed from the same feed as everything else.
+  property var sims: []
+
+  function parseIndexed(text, prefix) {
+    var byIndex = {}
+    var lines = (text || "").split("\n")
+    var re = new RegExp("^" + prefix + "\\.(\\d+)\\.([a-z]+)=(.*)$")
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(re)
+      if (!m) continue
+      if (!byIndex[m[1]]) byIndex[m[1]] = {}
+      byIndex[m[1]][m[2]] = m[3]
+    }
+    var out = []
+    var keys = Object.keys(byIndex).sort(function (a, b) { return a - b })
+    for (var k = 0; k < keys.length; k++) out.push(byIndex[keys[k]])
+    return out
+  }
+
   function parseProfiles(text) {
     var byIndex = {}
     var lines = (text || "").split("\n")
@@ -342,6 +361,7 @@ Panel {
     if (Object.keys(next).length === 0) return
     updateStats(next)
     info = next
+    sims = parseIndexed(raw, "sim")
   }
 
   function updateStats(next) {
@@ -426,6 +446,7 @@ Panel {
     if (verb === "disconnect") return "Disconnecting…"
     if (verb === "toggle") return root.connected ? "Disconnecting…" : "Connecting…"
     if (verb === "sim") return "Switching SIM…"
+    if (verb === "use") return "Switching SIM…"
     if (verb === "mode") return "Setting radio mode…"
     if (verb === "autoconnect") return "Saving…"
     if (verb === "profile") return "Updating the eSIM…"
@@ -1479,83 +1500,149 @@ Panel {
             }
           }
 
-          Row {
-            id: simRow
+Column {
+            id: simList
             width: parent.width
-            spacing: Style.space(6)
-            // Three cells only when the eSIM is selected, and not equal thirds:
-            // "eSIM Profiles" is twice the label the slots carry.
-            readonly property int cells: root.hasEsim ? 3 : 2
-            readonly property real usable: width - spacing * (cells - 1)
-            readonly property real cellWidth: cells === 3 ? usable * 0.28 : usable / 2
-            readonly property real wideWidth: usable - cellWidth * 2
-            // A slot switch is in flight; the row is unavailable until it lands.
+            spacing: Style.space(2)
+            // A switch is in flight; the list is unavailable until it lands.
             enabled: !root.busy
             opacity: root.busy ? 0.5 : 1
 
-            Button {
-              width: simRow.cellWidth
-              fontSize: Style.font.caption
-              verticalPadding: Style.space(2)
-              iconSize: Style.font.bodySmall
-              iconText: "󰒧"
-              text: root.slotHasCard(root.physicalSlot) ? "Physical" : "Physical · empty"
-              tooltipText: root.slotHasCard(root.physicalSlot) ? "" : "No card in the slot"
-              opacity: root.slotHasCard(root.physicalSlot) ? 1 : 0.55
-              bordered: true
-              active: root.info.slot === root.physicalSlot
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              onClicked: if (root.info.slot !== root.physicalSlot)
-                           root.runAction([root.cli, "sim", root.physicalSlot])
+            Repeater {
+              model: root.sims
+              delegate: Item {
+                id: simItem
+                required property var modelData
+                readonly property bool isActive: modelData.active === "yes"
+                width: simList.width
+                height: simName.implicitHeight + Style.space(6)
+
+                Rectangle {
+                  anchors.fill: parent
+                  radius: 4
+                  color: root.barForeground
+                  opacity: simArea.containsMouse && !simItem.isActive ? 0.08 : 0
+                }
+
+                // The active identity is the filled dot; picking another is
+                // one click, whatever mechanics that takes underneath.
+                Rectangle {
+                  id: simDot
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(5)
+                  height: width
+                  radius: width / 2
+                  color: simItem.isActive ? root.barForeground : "transparent"
+                  border.color: root.barForeground
+                  border.width: 1
+                  opacity: simItem.isActive ? 1 : 0.45
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  id: simName
+                  anchors.left: simDot.right
+                  anchors.leftMargin: Style.space(6)
+                  anchors.right: simKind.left
+                  anchors.rightMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  elide: Text.ElideRight
+                  text: (modelData.name || modelData.provider || "Unnamed")
+                        + (modelData.provider && modelData.provider !== modelData.name
+                           ? "  ·  " + modelData.provider : "")
+                  color: root.barForeground
+                  opacity: simItem.isActive ? 1 : 0.75
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  id: simKind
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: modelData.kind === "esim" ? "eSIM" : "SIM"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                MouseArea {
+                  id: simArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: simItem.isActive ? Qt.ArrowCursor : Qt.PointingHandCursor
+                  onClicked: {
+                    if (simItem.isActive) return
+                    root.runAction([root.cli, "use", modelData.iccid])
+                  }
+                }
+
+                PanelToolTip {
+                  visible: simArea.containsMouse && !simItem.isActive
+                  text: "Switch to this card — reconnects the modem, one authorization"
+                  fontFamily: root.fontFamily
+                }
+              }
             }
 
-            Button {
-              width: simRow.cellWidth
-              fontSize: Style.font.caption
-              verticalPadding: Style.space(2)
-              iconSize: Style.font.bodySmall
-              iconText: "󱤓"
-              text: root.slotHasCard(root.esimSlot) ? "eSIM" : "eSIM · empty"
-              tooltipText: root.slotHasCard(root.esimSlot) ? "" : "No profile installed on the eSIM"
-              opacity: root.slotHasCard(root.esimSlot) ? 1 : 0.55
-              bordered: true
-              active: root.info.slot === root.esimSlot
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              onClicked: if (root.info.slot !== root.esimSlot)
-                           root.runAction([root.cli, "sim", root.esimSlot])
+            // The list can only name profiles a profile read has seen.
+            Text {
+              textFormat: Text.PlainText
+              visible: root.sims.length <= 1 && root.hasEsim
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "eSIM profiles appear here after the first Manage eSIM visit."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
 
-            // The lock glyph says the click costs an authorization prompt.
-            // Present whenever the modem has an eUICC, but only usable while
-            // that eUICC is the selected card: it cannot answer otherwise, and
-            // selecting it drops the connection, which is the user's call.
-            Button {
-              visible: root.hasEsim
-              enabled: root.esimSelected
-              opacity: root.esimSelected ? 1 : 0.5
-              width: simRow.wideWidth
-              fontSize: Style.font.caption
-              verticalPadding: Style.space(2)
-              iconSize: Style.font.bodySmall
-              iconText: "󰌾"
-              text: "eSIM Profiles"
-              tooltipText: !root.esimSelected
-                           ? "Select the eSIM first to manage its profiles"
-                           : root.info.esim_transport === "mbim"
-                             ? "Reads the eSIM over MBIM; data keeps running"
-                             : "Needs lpac built with the mbim driver"
-              bordered: true
-              active: root.esimExpanded
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              onClicked: {
-                root.esimExpanded = !root.esimExpanded
-                // The one authorization is spent here, on opening the list.
-                // Closing it ends the elevated half rather than leaving it.
-                if (root.esimExpanded) root.loadProfiles()
-                else root.sessionStop()
+            // Management stays behind its own door, and the eUICC only
+            // answers while it is the selected card.
+            Item {
+              width: parent.width
+              height: manageLink.implicitHeight + Style.space(4)
+
+              Text {
+                textFormat: Text.PlainText
+                id: manageLink
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(4)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.esimExpanded ? "Close eSIM management" : "Manage eSIM…"
+                color: root.barForeground
+                opacity: !root.esimSelected ? 0.35
+                         : manageArea.containsMouse || root.esimExpanded ? 1 : 0.6
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  id: manageArea
+                  anchors.fill: parent
+                  anchors.margins: -Style.space(4)
+                  hoverEnabled: true
+                  enabled: root.esimSelected
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.esimExpanded = !root.esimExpanded
+                    // The one authorization is spent here, on opening the
+                    // list. Closing it ends the elevated half.
+                    if (root.esimExpanded) root.loadProfiles()
+                    else root.sessionStop()
+                  }
+                }
+
+                PanelToolTip {
+                  visible: manageArea.containsMouse
+                  text: root.esimSelected
+                        ? "Rename, add, remove profiles — one authorization"
+                        : "Select the eSIM first to manage its profiles"
+                  fontFamily: root.fontFamily
+                }
               }
             }
           }
