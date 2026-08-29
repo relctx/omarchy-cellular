@@ -192,6 +192,31 @@ Panel {
   // The provider ModemManager reports for the card. No authorization, no cache.
   readonly property string simLabel: info.sim_operator || ""
 
+  // Which management box is open: "", "device", "sim" or "apn". One at a
+  // time; the chip row at the bottom drives it.
+  property string mgmtView: ""
+  function toggleMgmt(v) {
+    mgmtView = (mgmtView === v) ? "" : v
+    if (mgmtView === "apn") carrierExpanded = true
+    if (mgmtView === "device") deviceExpanded = true
+    if (mgmtView !== "sim" && esimExpanded) {
+      esimExpanded = false
+      sessionStop()
+    }
+  }
+
+  // The active identity, named for the summary line.
+  readonly property string activeSimName: {
+    for (var i = 0; i < sims.length; i++) {
+      if (sims[i].active !== "yes") continue
+      var n = sims[i].name || sims[i].provider || ""
+      if (sims[i].provider && sims[i].provider !== sims[i].name)
+        n += "  ·  " + sims[i].provider
+      return n
+    }
+    return simLabel
+  }
+
   function seedLimitFields() {
     limitField.text = (info.limit && info.limit !== "off") ? info.limit : ""
     resetDayField.text = info.reset_day || ""
@@ -815,6 +840,16 @@ Panel {
           }
         }
 
+        // ---------- Active identity ----------
+        PanelSeparator { foreground: root.barForeground }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(4)
+          InfoPair { label: "SIM"; value: root.activeSimName || "—" }
+          InfoPair { label: "APN"; value: root.info.apn || "automatic" }
+        }
+
         // ---------- Data plan ----------
         PanelSeparator { foreground: root.barForeground }
 
@@ -1186,10 +1221,68 @@ Panel {
           }
         }
 
-        // ---------- APN ----------
+        // ---------- Management chips ----------
         PanelSeparator { foreground: root.barForeground }
 
+        Row {
+          id: mgmtChips
+          spacing: Style.space(6)
+          // Square chips, sized to their glyph; the row does not fill the
+          // panel. Button.implicitWidth includes padding, so the size is
+          // explicit.
+          readonly property real cell: Math.round(Style.font.body * 2.2)
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰄜"
+            tooltipText: "Device details"
+            bordered: true
+            active: root.mgmtView === "device"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("device")
+          }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰒧"
+            tooltipText: "SIM cards and eSIM profiles"
+            bordered: true
+            active: root.mgmtView === "sim"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("sim")
+          }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰖟"
+            tooltipText: "APN and carrier"
+            bordered: true
+            active: root.mgmtView === "apn"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("apn")
+          }
+        }
+
+        // ---------- APN (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "apn"
+          foreground: root.barForeground
+        }
+
         Column {
+          visible: root.mgmtView === "apn"
           width: parent.width
           spacing: Style.space(10)
 
@@ -1215,7 +1308,8 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: apnLabel.verticalCenter
               anchors.verticalCenterOffset: Math.round(apnLabel.topPadding / 2)
-              text: root.carrierExpanded ? "󰅀" : "󰅂"
+              visible: false
+              text: ""
               color: root.barForeground
               opacity: 0.6
               font.family: root.fontFamily
@@ -1246,7 +1340,7 @@ Panel {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: {
-                root.carrierExpanded = !root.carrierExpanded
+                root.carrierExpanded = true
                 if (!root.carrierExpanded) root.apnEditing = false
               }
             }
@@ -1335,14 +1429,14 @@ Panel {
           }
         }
 
-        // ---------- Device ----------
+        // ---------- Device (behind its chip) ----------
         PanelSeparator {
-          visible: root.hwPresent
+          visible: root.hwPresent && root.mgmtView === "device"
           foreground: root.barForeground
         }
 
         Column {
-          visible: root.hwPresent
+          visible: root.hwPresent && root.mgmtView === "device"
           width: parent.width
           spacing: Style.space(10)
 
@@ -1368,7 +1462,8 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: detailsHeader.verticalCenter
               anchors.verticalCenterOffset: Math.round(detailsHeader.topPadding / 2)
-              text: root.deviceExpanded ? "󰅀" : "󰅂"
+              visible: false
+              text: ""
               color: root.barForeground
               opacity: 0.6
               font.family: root.fontFamily
@@ -1378,7 +1473,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               id: deviceName
-              visible: !root.deviceExpanded
+              visible: false
               anchors.right: chevron.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: detailsHeader.verticalCenter
@@ -1418,7 +1513,7 @@ Panel {
               anchors.bottom: parent.bottom
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onClicked: root.deviceExpanded = !root.deviceExpanded
+              onClicked: root.deviceExpanded = true
             }
           }
 
@@ -1429,7 +1524,7 @@ Panel {
             clip: true
             // No height animation: the panel is a layer-shell surface, so
             // animating this reconfigures the Wayland surface every frame.
-            height: root.deviceExpanded ? deviceRows.implicitHeight : 0
+            height: deviceRows.implicitHeight
 
           Column {
             id: deviceRows
@@ -1460,10 +1555,14 @@ Panel {
           }
         }
 
-        // ---------- SIM slot ----------
-        PanelSeparator { foreground: root.barForeground }
+        // ---------- SIM cards (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "sim"
+          foreground: root.barForeground
+        }
 
         Column {
+          visible: root.mgmtView === "sim"
           width: parent.width
           spacing: Style.space(10)
 
@@ -1510,82 +1609,23 @@ Column {
 
             Repeater {
               model: root.sims
-              delegate: Item {
-                id: simItem
+              delegate: Button {
                 required property var modelData
                 readonly property bool isActive: modelData.active === "yes"
                 width: simList.width
-                height: simName.implicitHeight + Style.space(6)
-
-                Rectangle {
-                  anchors.fill: parent
-                  radius: 4
-                  color: root.barForeground
-                  opacity: simArea.containsMouse && !simItem.isActive ? 0.08 : 0
-                }
-
-                // The active identity is the filled dot; picking another is
-                // one click, whatever mechanics that takes underneath.
-                Rectangle {
-                  id: simDot
-                  anchors.left: parent.left
-                  anchors.leftMargin: Style.space(4)
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(5)
-                  height: width
-                  radius: width / 2
-                  color: simItem.isActive ? root.barForeground : "transparent"
-                  border.color: root.barForeground
-                  border.width: 1
-                  opacity: simItem.isActive ? 1 : 0.45
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  id: simName
-                  anchors.left: simDot.right
-                  anchors.leftMargin: Style.space(6)
-                  anchors.right: simKind.left
-                  anchors.rightMargin: Style.space(4)
-                  anchors.verticalCenter: parent.verticalCenter
-                  elide: Text.ElideRight
-                  text: (modelData.name || modelData.provider || "Unnamed")
-                        + (modelData.provider && modelData.provider !== modelData.name
-                           ? "  ·  " + modelData.provider : "")
-                  color: root.barForeground
-                  opacity: simItem.isActive ? 1 : 0.75
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  id: simKind
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(4)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: modelData.kind === "esim" ? "eSIM" : "SIM"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                MouseArea {
-                  id: simArea
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: simItem.isActive ? Qt.ArrowCursor : Qt.PointingHandCursor
-                  onClicked: {
-                    if (simItem.isActive) return
-                    root.runAction([root.cli, "use", modelData.iccid])
-                  }
-                }
-
-                PanelToolTip {
-                  visible: simArea.containsMouse && !simItem.isActive
-                  text: "Switch to this card — reconnects the modem, one authorization"
-                  fontFamily: root.fontFamily
-                }
+                fontSize: Style.font.caption
+                verticalPadding: Style.space(3)
+                iconSize: Style.font.bodySmall
+                iconText: modelData.kind === "esim" ? "󱤓" : "󰒧"
+                text: root.shortLabel(modelData.name || modelData.provider,
+                                      modelData.provider, modelData.iccid)
+                bordered: true
+                active: isActive
+                foreground: root.barForeground
+                fontFamily: root.fontFamily
+                tooltipText: isActive ? "The card in use"
+                                      : "Switch to this card — reconnects the modem"
+                onClicked: if (!isActive) root.runAction([root.cli, "use", modelData.iccid])
               }
             }
 
@@ -1894,6 +1934,7 @@ Column {
               }
             }
           }
+
 
 
       }
