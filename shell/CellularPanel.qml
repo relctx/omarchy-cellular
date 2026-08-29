@@ -295,6 +295,13 @@ Panel {
   // The card list, parsed from the same feed as everything else.
   property var sims: []
 
+  // Text messages: loaded when the box opens and when one arrives. The
+  // Messaging.Added signal rides the same event feed as everything else.
+  property var smsList: []
+  property var smsSeen: null
+  property string smsOpen: ""
+  function loadSms() { if (!smsProc.running) smsProc.running = true }
+
   // Diagnostics: read on demand behind one authorization, never polled.
   property var diagCells: []
   property var diagServing: ({})
@@ -387,7 +394,7 @@ Panel {
   }
 
   // Radio jargon translated: which generation, which numbered band, and the
-  // spectrum a person might recognise.
+  // spectrum a person might recognize.
   function bandLabel(band, name) {
     var b = String(band || "")
     var nrFreq = { 25: "1900 MHz", 41: "2.5 GHz", 66: "AWS", 71: "600 MHz",
@@ -451,7 +458,10 @@ Panel {
   // The last failed action's own words, shown where the chips are until the
   // next action clears it. The CLI already notifies; this is for the panel
   // that was open when it happened.
-  property string lastError: ""
+  function notifyError(msg) {
+    notifyProc.command = ["omarchy-notification-send", "-u", "critical", "Cellular", msg]
+    notifyProc.running = true
+  }
   function maskId(v) {
     if (!v) return "—"
     return detailsRevealed ? v : v.slice(0, 4) + "•".repeat(Math.max(0, v.length - 4))
@@ -656,7 +666,6 @@ Panel {
   // their own input can keep it instead of dropping it on the floor.
   function runAction(cmd) {
     if (actionProc.running) return false
-    root.lastError = ""
     root.busyLabel = root.labelFor(cmd)
     root.busyVerb = cmd[1] === "sh" ? "" : (cmd[1] || "")
     actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
@@ -718,6 +727,7 @@ Panel {
     stdout: StdioCollector { id: actionOut; waitForEnd: true }
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function (code) {
+      var doneVerb = root.busyVerb
       root.busyLabel = ""
       root.busyVerb = ""
       // The list is updated before the command runs, so a failure has to put
@@ -726,7 +736,8 @@ Panel {
         root.profiles = root.profilesUndo
         root.profileError = (actionErr.text || "").trim() || "That did not work."
       } else if (code !== 0) {
-        root.lastError = (actionErr.text || "").trim().split("\n")[0] || "That did not work."
+        root.notifyError((actionErr.text || "").trim().split("\n")[0]
+          || (doneVerb ? "The " + doneVerb + " command failed." : "That did not work."))
       } else if (code === 0) {
         // A profile command returns the refreshed list from inside the same
         // authorization. When it does, it replaces the optimistic guess and
@@ -738,6 +749,9 @@ Panel {
         }
       }
       root.profilesUndo = []
+      // A finished sms action owns the authoritative re-read; reading during
+      // the delete catches the object mid-teardown.
+      if (doneVerb === "sms") root.loadSms()
       root.opened ? root.refreshDetails() : root.refresh()
     }
   }
@@ -760,6 +774,36 @@ Panel {
   }
 
   Process {
+    id: smsProc
+    command: [root.cli, "sms", "feed"]
+    stdout: StdioCollector { id: smsOut; waitForEnd: true }
+    onExited: function (code) {
+      if (code !== 0) return
+      var list = root.parseIndexed(smsOut.text, "sms")
+      // Notify once per message we have never seen, received ones only.
+      // Keyed on content: paths renumber when the modem re-enumerates, and
+      // the backlog present at first read stays quiet.
+      var first = root.smsSeen === null
+      var seen = first ? {} : root.smsSeen
+      for (var i = 0; i < list.length; i++) {
+        var m = list[i]
+        var key = (m.number || "") + "|" + (m.time || "") + "|" + (m.text || "").slice(0, 40)
+        if (!first && !seen[key] && m.kind === "received") {
+          notifyProc.command = ["omarchy-notification-send", "-g", "󰍡",
+            "Text from " + (m.number || "unknown"),
+            (m.text || "").slice(0, 120)]
+          notifyProc.running = true
+        }
+        seen[key] = true
+      }
+      root.smsSeen = seen
+      root.smsList = list
+    }
+  }
+
+  Process { id: notifyProc }
+
+  Process {
     id: diagProc
     command: [root.cli, "cells"]
     stdout: StdioCollector { id: diagOut; waitForEnd: true }
@@ -771,7 +815,7 @@ Panel {
         root.diagCells = root.parseIndexed(diagOut.text, "cell")
         root.diagCa = root.parseIndexed(diagOut.text, "ca")
       } else {
-        root.lastError = (diagErr.text || "").trim().split("\n")[0] || "Could not read the cells."
+        root.notifyError((diagErr.text || "").trim().split("\n")[0] || "Could not read the cells.")
       }
     }
   }
@@ -826,7 +870,7 @@ Panel {
       if (line.indexOf("InterfacesRemoved") !== -1)
         busyLabel = "Switching SIM — modem restarting…"
       else if (line.indexOf("InterfacesAdded") !== -1)
-        busyLabel = "Switching SIM — modem initialising…"
+        busyLabel = "Switching SIM — modem initializing…"
       else if (line.indexOf("{'State': <8>}") !== -1)
         busyLabel = "Switching SIM — registered, connecting…"
       else if (line.indexOf("{'State': <11>}") !== -1)
@@ -839,6 +883,7 @@ Panel {
       if (root.opened) eventDebounce.restart()
       return
     }
+    if (line.indexOf(".Messaging.Added") !== -1) loadSms()
     eventDebounce.restart()
   }
 
@@ -1715,17 +1760,171 @@ Panel {
             fontFamily: root.fontFamily
             onClicked: root.toggleMgmt("diag")
           }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰍡"
+            tooltipText: "Text messages"
+            bordered: true
+            active: root.mgmtView === "sms"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.toggleMgmt("sms")
+              if (root.mgmtView === "sms") root.loadSms()
+            }
+          }
         }
 
-        Text {
-          textFormat: Text.PlainText
-          visible: root.lastError !== ""
+        // ---------- Messages (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "sms"
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.mgmtView === "sms"
           width: parent.width
-          wrapMode: Text.WordWrap
-          text: root.lastError
-          color: root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          spacing: Style.space(6)
+
+          PanelSectionHeader {
+            text: "MESSAGES"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+          }
+
+          // A list, not a wall: one line per message, click to read it,
+          // scrolls past six or so.
+          ListView {
+            id: smsView
+            width: parent.width
+            height: Math.min(contentHeight, Math.round(Style.font.body * 16))
+            clip: true
+            interactive: contentHeight > height
+            boundsBehavior: Flickable.StopAtBounds
+            spacing: Style.space(3)
+            model: root.smsList
+
+            delegate: Item {
+              id: smsCard
+              required property var modelData
+              readonly property bool open: root.smsOpen === modelData.path
+              width: smsView.width
+              implicitHeight: smsCol.implicitHeight + Style.space(5)
+
+              Rectangle {
+                anchors.fill: parent
+                radius: Style.cornerRadius
+                color: smsCard.open
+                       ? Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.05)
+                       : "transparent"
+                border.color: root.barForeground
+                border.width: 1
+                opacity: smsCard.open ? 0.6 : smsHdrArea.containsMouse ? 0.45 : 0.25
+              }
+
+              Column {
+                id: smsCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(4)
+                anchors.rightMargin: Style.space(4)
+                spacing: Style.space(2)
+
+                Item {
+                  width: parent.width
+                  implicitHeight: smsFrom.implicitHeight
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: smsFrom
+                    anchors.left: parent.left
+                    text: (smsCard.modelData.kind === "sent" ? "→ " : "")
+                          + (smsCard.modelData.number || "unknown")
+                    color: root.barForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.weight: Font.DemiBold
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.right: smsDelete.visible ? smsDelete.left : parent.right
+                    anchors.rightMargin: smsDelete.visible ? Style.space(4) : 0
+                    anchors.baseline: smsFrom.baseline
+                    text: smsCard.modelData.time || ""
+                    color: root.barForeground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: smsDelete
+                    visible: smsCard.open
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰩹"
+                    color: root.barForeground
+                    opacity: smsDelArea.containsMouse ? 1 : 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+
+                    MouseArea {
+                      id: smsDelArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(4)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        root.smsOpen = ""
+                        if (root.runAction([root.cli, "sms", "delete", smsCard.modelData.path]))
+                          root.loadSms()
+                      }
+                    }
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  maximumLineCount: smsCard.open ? 100 : 1
+                  elide: smsCard.open ? Text.ElideNone : Text.ElideRight
+                  wrapMode: smsCard.open ? Text.WordWrap : Text.NoWrap
+                  text: smsCard.modelData.text || ""
+                  color: root.barForeground
+                  opacity: smsCard.open ? 0.8 : 0.55
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                id: smsHdrArea
+                anchors.fill: parent
+                anchors.rightMargin: smsCard.open ? Style.space(24) : 0
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.smsOpen = smsCard.open ? "" : smsCard.modelData.path
+                z: -1
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.smsList.length === 0
+            width: parent.width
+            text: "No stored messages."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
         }
 
         // ---------- Diagnostics (behind its chip) ----------
@@ -1924,10 +2123,21 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
+            visible: root.diagRows.length > 0
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Neighbors are reported for the current radio mode only."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            textFormat: Text.PlainText
             visible: root.diagCells.length === 0 && !root.diagLoading
             width: parent.width
             wrapMode: Text.WordWrap
-            text: "Nothing read yet. Read cells asks the modem — one authorization."
+            text: "Nothing read yet. Read cells needs authorization."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

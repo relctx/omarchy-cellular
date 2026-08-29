@@ -1161,7 +1161,7 @@ cmd_signal() {
   command -v qmicli >/dev/null || return 0
 
   echo
-  echo "Modem (one authorization):"
+  echo "Modem (needs authorization):"
   local out
   out=$(pkexec qmicli --device="$dev" --device-open-mbim --device-open-proxy \
     --nas-get-signal-info 2>/dev/null) || {
@@ -1641,10 +1641,10 @@ read_signal() {
   done
 }
 
-# The cell neighbourhood, read from the modem's QMI NAS service over the MBIM
+# The cell neighborhood, read from the modem's QMI NAS service over the MBIM
 # port it already shares with ModemManager. One authorization covers both
 # queries. Presentation only: serving cell, its band and width, and every
-# neighbour the modem can hear, strongest first. The reader concludes.
+# neighbor the modem can hear, strongest first. The reader concludes.
 cmd_cells() {
   command -v qmicli >/dev/null || {
     echo "Cell diagnostics need qmicli (libqmi), which is not installed." >&2
@@ -1744,9 +1744,9 @@ cmd_cells() {
       }
     }'
 
-  # LTE neighbours, strongest first. qmicli names the spectrum in
+  # LTE neighbors, strongest first. qmicli names the spectrum in
   # parentheses -- "(E-UTRA band 12: 700 a)" -- and the name is the part a
-  # person recognises.
+  # person recognizes.
   awk '
     /EUTRA Absolute RF Channel Number:/ {
       band = "?"; bname = ""; chan = ""
@@ -1773,7 +1773,7 @@ cmd_cells() {
       NR-1,$1, NR-1,$2, NR-1,$3, NR-1,$4, NR-1,$5, NR-1,$6, NR-1,$7
   }'
 
-  # NR camps report one block for the serving cell and no neighbour list;
+  # NR camps report one block for the serving cell and no neighbor list;
   # render it as the one row there is, marked serving.
   if grep -q '5GNR cell information' <<<"$cells"; then
     awk -v band="$sband" '
@@ -1788,6 +1788,83 @@ cmd_cells() {
       }
     ' <<<"$cells"
   fi
+}
+
+# Text messages, straight off the bus: list, read, delete, all unprivileged.
+# Carrier texts are most of what a data SIM ever receives -- balance notices,
+# activation confirmations, roaming warnings -- and deleting them is the half
+# the Windows mobile-broadband panel never shipped.
+sms_paths() {
+  local idx
+  idx=$(modem_index) || return 1
+  busctl --json=short call org.freedesktop.ModemManager1 \
+    "/org/freedesktop/ModemManager1/Modem/$idx" \
+    org.freedesktop.ModemManager1.Modem.Messaging List 2>/dev/null |
+    jq -r '.data[0][]' 2>/dev/null
+}
+
+sms_prop() {
+  busctl get-property org.freedesktop.ModemManager1 "$1" \
+    org.freedesktop.ModemManager1.Sms "$2" 2>/dev/null |
+    sed -n 's/^s "\(.*\)"$/\1/p; s/^u \([0-9]*\)$/\1/p'
+}
+
+cmd_sms() {
+  need_jq || return 1
+  local action="${1:-list}"
+  case "$action" in
+  list | feed)
+    local p n=0 num ts text
+    while IFS= read -r p; do
+      [[ -n $p ]] || continue
+      num=$(sms_prop "$p" Number)
+      ts=$(sms_prop "$p" Timestamp)
+      # An object mid-deletion still lists but answers nothing; skip it.
+      [[ -z $num && -z $ts && -z $(sms_prop "$p" Text) ]] && continue
+      # PduType 1 is a received message, 2 one this side sent.
+      local kind
+      kind=$([[ $(sms_prop "$p" PduType) == 2 ]] && echo sent || echo received)
+      # busctl escapes the string it prints: a newline in the message comes
+      # out as literal backslash-n. Unescape, then fold real control
+      # characters to spaces (the feed is one line per field) and trim.
+      text=$(sms_prop "$p" Text | sed 's/\\"/"/g' | xargs -0 printf '%b' 2>/dev/null |
+        tr '\n\r\t' '   ' | sed 's/[[:space:]]*$//')
+      # 2026-08-28T16:39:37-07 -> 2026-08-28 16:39; the zone is noise here.
+      ts=${ts:0:16}
+      ts=${ts/T/ }
+      if [[ $action == feed ]]; then
+        printf 'sms.%d.path=%s\n' "$n" "${p##*/}"
+        printf 'sms.%d.number=%s\n' "$n" "$num"
+        printf 'sms.%d.time=%s\n' "$n" "$ts"
+        printf 'sms.%d.text=%s\n' "$n" "$text"
+        printf 'sms.%d.kind=%s\n' "$n" "$kind"
+      else
+        printf '%s  %s%s\n  %s\n' "$ts" "$([[ $kind == sent ]] && echo '→ ')" "${num:-unknown}" "$text"
+      fi
+      n=$((n + 1))
+    done < <(sms_paths)
+    if ((n == 0)) && [[ $action == list ]]; then
+      echo "No stored messages."
+    fi
+    ;;
+  delete)
+    local id="${2:-}" idx
+    [[ $id =~ ^[0-9]+$ ]] || {
+      echo "usage: omarchy-cellular sms delete <id>   (ids from: omarchy-cellular sms)" >&2
+      return 2
+    }
+    idx=$(modem_index) || return 1
+    busctl call org.freedesktop.ModemManager1 \
+      "/org/freedesktop/ModemManager1/Modem/$idx" \
+      org.freedesktop.ModemManager1.Modem.Messaging Delete o \
+      "/org/freedesktop/ModemManager1/SMS/$id" 2>&1 | grep -v '^$' || true
+    echo "Deleted."
+    ;;
+  *)
+    echo "usage: omarchy-cellular sms [list|delete <id>]" >&2
+    return 2
+    ;;
+  esac
 }
 
 # One carrier code, sent in-band: USSD, which is how GSM-lineage networks
@@ -2221,7 +2298,7 @@ esim_slot() {
 
 # Whether this lpac was built with a given APDU driver. Arch's lpac package
 # ships at, pcsc and stdio only; lpac-git adds mbim and qmi. LPAC_APDU is set
-# for the query because a bare 'driver list' initialises the default backend
+# for the query because a bare 'driver list' initializes the default backend
 # and fails on any machine without pcscd running.
 lpac_has_driver() {
   LPAC_APDU=$1 lpac driver list 2>/dev/null |
@@ -2444,7 +2521,7 @@ sim_iccid_now() {
 # a REFRESH proactive command so the modem re-reads the card by itself. That is
 # how the new ICCID is meant to reach ModemManager. Modems that ignore it leave
 # the SIM object describing the profile that was just replaced, so this waits
-# for the card to follow and only re-initialises the modem when it did not.
+# for the card to follow and only re-initializes the modem when it did not.
 sim_follow_profile() {
   local want=$1 i cur
   [[ -n $want ]] || return 0
@@ -2453,7 +2530,7 @@ sim_follow_profile() {
     [[ $cur == "$want" ]] && return 0
     sleep 0.5
   done
-  echo "The modem did not follow the profile change; re-initialising it." >&2
+  echo "The modem did not follow the profile change; re-initializing it." >&2
   sim_reread
 }
 
@@ -3404,6 +3481,7 @@ esim-session) cmd_esim_session ;;
 sims) cmd_sims ;;
 cells) cmd_cells ;;
 code) cmd_code "${2:-}" ;;
+sms) cmd_sms "${2:-}" "${3:-}" ;;
 use) cmd_use "${2:-}" ;;
 mode) cmd_mode "${2:-}" ;;
 identify) cmd_identify ;;
@@ -3453,8 +3531,9 @@ usage: omarchy-cellular <command>
   use <iccid>         become one of them: slot switch, profile enable, or both
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
   signal              every metric the modem reports, RSRQ included
-  cells               serving cell, band, width, and every neighbour heard
+  cells               serving cell, band, width, and every neighbor heard
   code '<*code#>'     send a carrier code in-band (USSD; dialed on CDMA)
+  sms [delete <id>]   read or delete stored text messages
   pin ...             SIM lock: status, unlock, puk, on|off, change
   at '<command>'      send one AT command, print the reply (diagnostics)
   profile ...         eSIM profiles: list, enable, delete, nickname, download, scan

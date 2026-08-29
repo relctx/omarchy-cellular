@@ -199,7 +199,7 @@ operations use `pkexec` when reached:
 1. Switching SIM slots. See Notes.
 2. eSIM profile operations. One authorization covers a whole management session; the
    connection stays up and nothing is stopped.
-3. Cell diagnostics: one authorization reads carriers, aggregation and neighbours.
+3. Cell diagnostics: one authorization reads carriers, aggregation and neighbors.
 4. Recovering a control port lost across suspend, when the port is gone.
 
 ## Installed files
