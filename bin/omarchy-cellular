@@ -405,9 +405,8 @@ modem_index() {
   local f="$CACHE_DIR/index"
   [[ -s $f ]] || {
     mkdir -p "$CACHE_DIR"
-    # `mmcli -L` works, but prints a libmm-glib runtime-check warning while a
-    # modem is being rebuilt. The bus answers the same question exactly and
-    # without spawning the client. See sim_property for the worse case.
+    # The bus answers this exactly; `mmcli -L` warns on stderr while a modem
+    # is being rebuilt.
     busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
       sed -n 's|.*/Modem/\([0-9]\{1,\}\)$|\1|p' | head -1 >"$f"
   }
@@ -924,8 +923,7 @@ read_details() {
   local simpath
   simpath=$(kv "$dump" modem.generic.sim | sed 's|.*/SIM/||')
   if [[ -n $simpath ]]; then
-    # Read the SIM over D-Bus. `mmcli -i` cannot do it at all here: see
-    # sim_property.
+    # Read the SIM over D-Bus; see sim_property.
     local sim_dbus="/org/freedesktop/ModemManager1/SIM/$simpath"
     simprop() {
       busctl get-property org.freedesktop.ModemManager1 "$sim_dbus" \
@@ -963,68 +961,62 @@ read_details() {
 
 # `mode` with no argument prints the current allowed set; with arguments it sets
 # them. "auto" means every mode the modem supports, preferring the fastest.
-# Send a raw AT command. ModemManager refuses --command outside debug mode and
-# the port is root-only, so this goes through pkexec. Diagnostics only:
-# state-changing commands behind MM's back will confuse it.
-cmd_at() {
-  local idx dump port
-  [[ -n ${1:-} ]] || {
-    echo "usage: omarchy-cellular at '<command>'    e.g. omarchy-cellular at 'AT+CSQ'" >&2
-    return 2
-  }
-  idx=$(modem_index_wait)
-  [[ -n $idx ]] || {
+# The APNs the carrier provisioned into this SIM, from ModemManager's 3GPP
+# profile manager. Not every modem implements that interface; an empty answer
+# means the modem does not report them, not that there are none.
+cmd_apn_list() {
+  need_jq || return 1
+
+  local idx json
+  idx=$(modem_index) || {
     echo "No modem detected." >&2
     return 1
   }
-  port=$(at_port) || {
-    echo "This modem exposes no AT port." >&2
-    return 1
-  }
-  # `timeout cat` always exits non-zero: the port never closes, so it is the
-  # timeout that ends the read. Succeed on having an answer instead.
-  # Leading/trailing whitespace makes the modem reject the line outright.
-  local want="${1#"${1%%[![:space:]]*}"}"
-  want="${want%"${want##*[![:space:]]}"}"
 
-  dev_node_ok "$port" || {
-    echo "Refusing to use $port: not a character device under /dev." >&2
+  json=$(busctl --json=short call org.freedesktop.ModemManager1 \
+    "/org/freedesktop/ModemManager1/Modem/$idx" \
+    org.freedesktop.ModemManager1.Modem.Modem3gpp.ProfileManager List 2>/dev/null) || {
+    echo "This modem does not report its provisioned APNs to ModemManager." >&2
     return 1
   }
-  local out
-  out=$(pkexec sh -c 'exec 3<>"$1"; printf "%s\r" "$2" >&3; timeout 3 cat <&3' \
-    sh "$port" "$want")
-  [[ -n $out ]] || {
-    echo "No answer from the modem. It may not support that command," >&2
-    echo "or ModemManager had the port busy. Try again, or check syntax." >&2
-    return 1
-  }
-  printf '%s\n' "$out"
-}
 
-# The APNs the carrier provisioned into this SIM, including ones the database
-# does not have. Signalling contexts (IMS, emergency) are labelled, not hidden.
-cmd_apn_list() {
-  local out
-  out=$(cmd_at 'AT+CGDCONT?' 2>/dev/null)
-  [[ -n $out ]] || {
-    echo "Could not read the modem's APN list." >&2
+  local rows
+  rows=$(jq -r '
+    (.data[0] // [])
+    | to_entries[]
+    | (.value["profile-id"].data // .key) as $ctx
+    | (.value.apn.data // "") as $apn
+    | (.value["ip-type"].data // 0) as $ip
+    | select($apn != "")
+    | "\($ctx)\t\($apn)\t\($ip)"
+  ' <<<"$json" 2>/dev/null)
+
+  [[ -n $rows ]] || {
+    echo "ModemManager reports no provisioned APNs for this SIM." >&2
+    echo "Some modems do not expose them. The one in use is shown by: omarchy-cellular status" >&2
     return 1
   }
+
   local cur
   cur=$(get_cfg APN)
 
-  printf '%s\n' "$out" | sed -n 's/^+CGDCONT: \([0-9]*\),"\([^"]*\)","\([^"]*\)".*/\1\t\2\t\3/p' |
-    while IFS=$'\t' read -r ctx iptype apn; do
-      [[ -n $apn ]] || continue
-      local note=""
-      case "$apn" in
-      ims) note="  (VoLTE signalling — not for data)" ;;
-      sos) note="  (emergency calls — not for data)" ;;
-      esac
-      [[ $ctx == 1 ]] && note="${note:-  (default)}"
-      printf '  %s%-24s %-8s%s\n' "$([[ $apn == "$cur" ]] && echo '* ' || echo '  ')" "$apn" "$iptype" "$note"
-    done
+  local ctx apn ip iptype note
+  while IFS=$'\t' read -r ctx apn ip; do
+    # MMBearerIpFamily: 1 IPv4, 2 IPv6, 3 IPv4v6.
+    case $ip in
+    1) iptype=IP ;;
+    2) iptype=IPV6 ;;
+    3) iptype=IPV4V6 ;;
+    *) iptype="--" ;;
+    esac
+    note=""
+    case "${apn,,}" in
+    ims) note="  (VoLTE signalling — not for data)" ;;
+    sos | emergency) note="  (emergency calls — not for data)" ;;
+    esac
+    [[ $ctx == 1 ]] && note="${note:-  (default)}"
+    printf '  %s%-24s %-8s%s\n' "$([[ $apn == "$cur" ]] && echo '* ' || echo '  ')" "$apn" "$iptype" "$note"
+  done <<<"$rows"
   echo
   echo "* = currently configured.  Set one with: omarchy-cellular apn <name>"
 }
@@ -1404,29 +1396,6 @@ sysfs_dir_ok() {
   [[ -d $p ]]
 }
 
-# The AT device node, for lpac and raw AT. ModemManager's port list drops the
-# AT port while driving the modem over MBIM; the kernel node is there
-# regardless. USB modems expose ttyUSB* instead of wwan*at*.
-at_port() {
-  # The kernel labels wwan ports by function, so ask rather than guess at
-  # names: MHI parts expose wwan0at0, others number differently.
-  local d n
-  for d in /sys/class/wwan/*/; do
-    [[ -r $d/type ]] || continue
-    [[ $(cat "$d/type" 2>/dev/null) == AT ]] || continue
-    n=$(basename "$d")
-    [[ -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
-  done
-
-  # Older USB modems predate the wwan subsystem and expose tty nodes. Which
-  # ttyUSB carries AT varies per device, so take ModemManager's word for it.
-  local idx
-  idx=$(modem_index) || return 1
-  [[ -n $idx ]] || return 1
-  n=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (at)$|\1|p' <<<"$(modem_dump "$idx")" | head -1)
-  [[ -n $n && -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
-  return 1
-}
 
 # The MBIM control port, found the same way as the AT one.
 mbim_port() {
@@ -1662,16 +1631,9 @@ esim_run() {
   return 0
 }
 
-# One property off a SIM object, over the bus, because `mmcli -i` is broken:
-# on ModemManager 1.24.2 it exits 139 every time, for a physical card and an
-# eUICC alike, addressed by index or by full object path, with the modem
-# settled -- it dereferences the SIM's parent modem object and segfaults.
-#
-#   mm_object_get_modem: runtime check failed: (MM_IS_MODEM (modem))
-#
-# `mmcli -m` on the same daemon is fine, so this is the client's SIM path and
-# not the daemon: everything below is present and correct on the bus. Reading
-# it any other way returns nothing and dumps core.
+# One property off a SIM object. Use this and not `mmcli -i`, which segfaults
+# on every SIM read (ModemManager 1.24.2, mm_object_get_modem) and so returns
+# nothing while dumping core. `mmcli -m` is unaffected.
 sim_property() {
   local path=$1 name=$2
   [[ $path == /org/freedesktop/ModemManager1/SIM/* ]] || return 1
@@ -2604,7 +2566,6 @@ sim) cmd_sim "${2:-}" "${3:-}" ;;
 profile) cmd_profile "${2:-}" "${3:-}" "${4:-}" ;;
 esim-session) cmd_esim_session ;;
 mode) cmd_mode "${2:-}" ;;
-at) cmd_at "${2:-}" ;;
 identify) cmd_identify ;;
 apn)
   [[ ${2:-} == list ]] && { cmd_apn_list; exit $?; }
@@ -2646,7 +2607,6 @@ usage: omarchy-cellular <command>
   toggle              connect if down, disconnect if up
   restart             reconnect
   mode [auto|5g|4g|3g]  show or set the radio mode
-  at '<command>'       send a raw AT command (diagnostics)
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config

@@ -35,8 +35,10 @@ yay -S lpac
 omarchy pkg add zbar
 ```
 
-`lpac` is a Local Profile Assistant. It talks to the eUICC over the modem's AT port and
-implements the list, switch, rename, delete and install operations. `zbar` decodes a QR
+`lpac` is a Local Profile Assistant. It talks to the eUICC over the modem's MBIM port,
+which ModemManager keeps open, and implements the list, switch, rename, delete and
+install operations. It must be built with the `mbim` driver: the `lpac-git` package is,
+the `lpac` package is not. `zbar` decodes a QR
 code captured from the screen. Without `zbar`, activation codes can still be typed in.
 `omarchy-cellular doctor` reports which are installed.
 
@@ -45,7 +47,7 @@ code captured from the screen. Without `zbar`, activation codes can still be typ
 Developed against a Lenovo ThinkPad X1 Carbon Gen 12 with a Quectel RM520N-GL (5G,
 MHI/PCIe). USB modems should work, but have not been tested.
 
-Two code paths depend on the bus. AT port discovery reads `/sys/class/wwan`, where the
+Two code paths depend on the bus. MBIM port discovery reads `/sys/class/wwan`, where the
 kernel labels each port by function, and falls back to ModemManager's port list on USB
 modems older than the wwan subsystem. Control-port recovery after suspend re-authorizes
 the USB device to force a re-probe, and returns early on PCIe, where there is no
@@ -93,7 +95,6 @@ omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
 omarchy-cellular metered [yes|no]      whether this connection costs money
 omarchy-cellular identify            re-read ICCID and EID
-omarchy-cellular at '<command>'      raw AT command
 omarchy-cellular apply               re-read cellular.conf and reconnect
 omarchy-cellular config              edit ~/.config/omarchy/cellular.conf
 omarchy-cellular log
@@ -178,8 +179,8 @@ Nothing is granted at install time, and normal operation does not prompt. Three 
 use `pkexec` when reached:
 
 1. Switching SIM slots. See Notes.
-2. Reading or changing eSIM profiles. lpac needs the AT port, so ModemManager is stopped
-   for the call.
+2. Reading or changing eSIM profiles. One authorization covers a whole session: the
+   connection stays up and nothing is stopped.
 3. Recovering a control port lost across suspend, when the port is gone.
 
 ## Installed files
