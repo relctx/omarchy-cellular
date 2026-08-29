@@ -66,6 +66,9 @@ nm_ensure() {
 # Push cellular.conf onto the profile. Idempotent; safe to call on every change.
 nm_apply() {
   nm_ensure || return 1
+  # The values below are the active card's; a card never seen gets its file
+  # seeded first, so a fresh profile switch cannot inherit another carrier.
+  card_ensure
 
   local v4=auto v6=auto
   case "$(get_cfg IP_TYPE)" in
@@ -432,19 +435,83 @@ ensure_cfg() {
   install -m 600 "$template" "$CONFIG"
 }
 
+# ----------------------------------------------------------- per-card config
+# APN, credentials, PIN and operator are properties of a card, not of the
+# machine: five different cards can live in this modem and each carries its
+# own carrier. They are stored per ICCID, one file per card, and the accessors
+# below route these keys there whenever a card is present. cellular.conf keeps
+# only what belongs to the machine.
+CARD_DIR="$HOME/.config/omarchy/cellular.d"
+CARD_KEYS=" APN APN_USER APN_PASS PIN OPERATOR_ID CARRIER "
+
+# The active card's ICCID, cached for the run: the panel feed calls the
+# accessors dozens of times.
+active_iccid() {
+  local f="$CACHE_DIR/iccid"
+  [[ -s $f ]] || {
+    mkdir -p "$CACHE_DIR"
+    sim_iccid_now 2>/dev/null >"$f" || true
+  }
+  cat "$f" 2>/dev/null
+}
+
+card_file() {
+  local i
+  i=$(active_iccid)
+  [[ $i =~ ^[0-9]{10,22}$ ]] || return 1
+  printf '%s/%s.conf' "$CARD_DIR" "$i"
+}
+
+card_key() { [[ $CARD_KEYS == *" $1 "* ]]; }
+
+# A slot switch re-enumerates the modem, and ModemManager serves the new
+# card's identity noticeably after the card itself is ready. Settings keyed to
+# the card cannot be applied until it answers.
+card_wait_resolvable() {
+  local i
+  for ((i = 0; i < 24; i++)); do
+    [[ -n $(active_iccid) ]] && return 0
+    cache_flush
+    sleep 0.5
+  done
+  return 1
+}
+
+# First sight of a card: seed its file from what the modem knows.# First sight of a card: seed its file from what the modem knows. Detect is
+# quiet here; its answer lands in the file, not on a feed.
+card_ensure() {
+  local f
+  f=$(card_file) || return 0
+  [[ -f $f ]] && return 0
+  mkdir -p "$CARD_DIR" && chmod 700 "$CARD_DIR"
+  : >"$f" && chmod 600 "$f"
+  OMARCHY_CELLULAR_QUIET=1 carrier_auto >/dev/null 2>&1 || true
+}
+
 get_cfg() {
+  local src="$CONFIG" f
+  # A card key answers from the card's file once one exists; the legacy file
+  # serves only cards never seen before the split.
+  if card_key "$1" && f=$(card_file) && [[ -f $f ]]; then
+    src=$f
+  fi
   ensure_cfg
-  sed -n "s/^[[:space:]]*$1[[:space:]]*=//p" "$CONFIG" 2>/dev/null | tail -1 |
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=//p" "$src" 2>/dev/null | tail -1 |
     sed -e 's/[[:space:]]\+#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
 set_cfg() {
-  local key="$1" val="$2"
-  ensure_cfg
-  if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$CONFIG" 2>/dev/null; then
-    sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key}=${val}|" "$CONFIG"
+  local key="$1" val="$2" dst="$CONFIG" f
+  if card_key "$key" && f=$(card_file); then
+    dst=$f
+    [[ -f $dst ]] || { mkdir -p "$CARD_DIR" && chmod 700 "$CARD_DIR" && : >"$dst" && chmod 600 "$dst"; }
   else
-    printf '%s=%s\n' "$key" "$val" >>"$CONFIG"
+    ensure_cfg
+  fi
+  if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$dst" 2>/dev/null; then
+    sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key}=${val}|" "$dst"
+  else
+    printf '%s=%s\n' "$key" "$val" >>"$dst"
   fi
 }
 
@@ -1483,8 +1550,24 @@ read_signal() {
   done
 }
 
+# The event feed lands here on every change, which makes this the reaction
+# point: when the card is not the one whose settings were last pushed, push
+# the right ones. Modify only -- the switch flows reconnect themselves, and a
+# card change without them (mmcli by hand) should not cost a live connection.
+card_track() {
+  local i last f="$STATE_DIR/card-synced"
+  i=$(active_iccid)
+  [[ -n $i ]] || return 0
+  last=$(cat "$f" 2>/dev/null)
+  [[ $i == "$last" ]] && return 0
+  card_ensure
+  nm_apply >/dev/null 2>&1 || return 0
+  mkdir -p "$STATE_DIR" && printf '%s' "$i" >"$f"
+}
+
 cmd_panel() {
   read_state
+  card_track
   meter_update
   printf 'state=%s\n' "$STATE"
   printf 'operator=%s\n' "$OPERATOR"
@@ -2437,7 +2520,8 @@ cmd_sim() {
   if [[ -n $idx ]]; then
     echo "Switching to SIM slot $slot (this reconnects the modem)…"
     if esim_run "$slot" 0 &&
-      nm_apply && { ! nm_is_active || nm_up; }; then
+      { cache_flush; card_wait_resolvable; nm_apply; } &&
+      { ! nm_is_active || nm_up; }; then
       read_state
       notify "SIM slot $slot active — ${OPERATOR:-connected}"
       cmd_status
