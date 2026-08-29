@@ -3193,62 +3193,7 @@ apply_gui() {
   fi
 }
 
-# Country → carrier → APN picker built on omarchy-menu-select.
-carrier_choose() {
-  local rows country cc provider apn_rows row choice
-  rows=$("$PROVIDERS" countries) || return 1
 
-  local names=()
-  mapfile -t names < <(cut -f2 <<<"$rows")
-  country=$(omarchy-menu-select "Country" "${names[@]}" -- --width 400) || return 0
-  [[ -n $country ]] || return 0
-  cc=$(awk -F'\t' -v n="$country" '$2 == n { print $1; exit }' <<<"$rows")
-
-  local provs=()
-  mapfile -t provs < <("$PROVIDERS" providers "$cc")
-  ((${#provs[@]})) || return 1
-  provider=$(omarchy-menu-select "Carrier in $country" "${provs[@]}" -- --width 400) || return 0
-  [[ -n $provider ]] || return 0
-
-  apn_rows=$("$PROVIDERS" apns "$cc" "$provider")
-  if [[ -z $apn_rows ]]; then
-    notify "$provider has no data APN in the database"
-    return 1
-  fi
-
-  # Most carriers publish exactly one data APN — do not make the user confirm it.
-  if [[ $(wc -l <<<"$apn_rows") -eq 1 ]]; then
-    row=$apn_rows
-  else
-    local opts=()
-    mapfile -t opts < <(awk -F'\t' '{ print ($2 == "" ? $1 : $1 "  —  " $2) }' <<<"$apn_rows")
-    choice=$(omarchy-menu-select "APN for $provider" "${opts[@]}" -- --width 500) || return 0
-    [[ -n $choice ]] || return 0
-    row=$(awk -F'\t' -v v="${choice%%  —  *}" '$1 == v { print; exit }' <<<"$apn_rows")
-  fi
-
-  local value label user password
-  IFS=$'\t' read -r value label user password <<<"$row"
-  set_cfg APN "$value"
-  set_cfg APN_USER "$user"
-  set_cfg APN_PASS "$password"
-  notify "Carrier set: $provider — APN $value"
-  apply_gui
-}
-
-cmd_apn_input() {
-  local apn
-  # Only a non-zero exit means cancelled. An empty submission is a real choice:
-  # eSIM profiles often negotiate the APN themselves.
-  apn=$(omarchy-menu-input "APN") || return 0
-  set_cfg APN "$apn"
-  if [[ -n $apn ]]; then
-    notify "APN set to $apn"
-  else
-    notify "APN cleared — the network will choose"
-  fi
-  apply_gui
-}
 
 cmd_notify_status() {
   local body
@@ -3260,7 +3205,6 @@ cmd_notify_status() {
 cmd_carrier() {
   case "${1:-}" in
   auto | detect) carrier_auto ;;
-  choose) carrier_choose ;;
   list)
     if [[ -z ${2:-} ]]; then
       $PROVIDERS countries
@@ -3296,7 +3240,6 @@ cmd_carrier() {
 usage: omarchy-cellular carrier <command>
 
   auto                          detect the carrier from the SIM and set its APN
-  choose                        pick country/carrier/APN via the Omarchy menu
   list                          list countries
   list <cc>                     list carriers in that country
   list <cc> <provider>          list that carrier's data APNs
@@ -3451,7 +3394,6 @@ present) wwan_hw_present ;;
 is-connected) nm_is_active ;;
 is-autoconnect) nm_autoconnect_get ;;
 notify-status) cmd_notify_status ;;
-apn-input) cmd_apn_input ;;
 connect | up) cmd_connect ;;
 disconnect | down) cmd_disconnect ;;
 toggle) cmd_toggle ;;

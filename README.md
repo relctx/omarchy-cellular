@@ -124,7 +124,6 @@ omarchy-cellular carrier list                  # countries
 omarchy-cellular carrier list pl               # carriers in Poland
 omarchy-cellular carrier list pl Orange        # that carrier's data APNs
 omarchy-cellular carrier set pl Orange         # apply APN, username and password
-omarchy-cellular carrier choose                # the same, as menu pickers
 omarchy-cellular apply
 ```
 
