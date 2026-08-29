@@ -1662,6 +1662,22 @@ esim_run() {
   return 0
 }
 
+# Enabling a different profile swaps the card under the modem. Nothing in the
+# MBIM path tells ModemManager that happened, so its SIM object keeps serving
+# the old ICCID and operator until the modem is re-initialised. Enable is on
+# ModemManager's D-Bus whitelist and takes a bool, so the cycle needs no
+# privilege; it costs the connection for a few seconds, which a profile change
+# costs anyway.
+sim_reread() {
+  local idx
+  idx=$(modem_index) || return 1
+  [[ -n $idx ]] || return 1
+  mmcli -m "$idx" --disable >/dev/null 2>&1 || return 1
+  mmcli -m "$idx" --enable >/dev/null 2>&1 || return 1
+  cache_flush
+  modem_index_wait 30 >/dev/null
+}
+
 # SGP.22 activation code: LPA:1$<smdp-server>$<matching-id> with two optional
 # fields after. Checked against the grammar rather than the prefix, because it
 # arrives from a QR image or a paste and goes on to lpac.
@@ -1793,6 +1809,14 @@ cmd_esim_session() {
     if [[ $verb == list || $rc == 0 ]]; then
       profiles_render "$(printf '%s' "$json")" 2>/dev/null
     fi
+
+    # A newly enabled profile is a different card; ModemManager has to be told
+    # to look again, and the connection has to be rebuilt on it.
+    if [[ $verb == enable && $rc == 0 ]]; then
+      sim_reread
+      nm_apply
+    fi
+
     printf 'rc=%s\n===END %s===\n' "$rc" "$rc"
   done
 
@@ -1933,7 +1957,7 @@ cmd_profile() {
       echo "Profile $arg ${action}d."
       notify "eSIM profile ${action}d"
       emit_profiles_if_quiet
-      [[ $action == enable ]] && nm_apply
+      [[ $action == enable ]] && { sim_reread; nm_apply; }
     else
       echo "Could not $action profile $arg." >&2
       notify "eSIM profile $action failed"
