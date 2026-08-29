@@ -1934,6 +1934,18 @@ cmd_sims() {
     idx=$((idx + 1))
   done
 
+  # An eUICC with nothing cached still needs a door: a placeholder entry
+  # whose selection is the slot switch that makes Manage reachable, which is
+  # the whole first-run bootstrap on an empty card.
+  if [[ -n $eslot && ( ! -r $STATE_DIR/profiles.cache || ! -s $STATE_DIR/profiles.cache ) ]]; then
+    printf 'sim.%s.iccid=\n' "$idx"
+    printf 'sim.%s.name=eSIM\n' "$idx"
+    printf 'sim.%s.kind=esim-slot\n' "$idx"
+    printf 'sim.%s.slot=%s\n' "$idx" "$eslot"
+    printf 'sim.%s.active=%s\n' "$idx" "$([[ $(kv "$dump" modem.generic.primary-sim-slot) == "$eslot" ]] && echo yes || echo no)"
+    idx=$((idx + 1))
+  fi
+
   # Cached profiles; the test-class ones stay in Manage, not here.
   local ci cname cprov cstate cclass
   if [[ -r $STATE_DIR/profiles.cache ]]; then

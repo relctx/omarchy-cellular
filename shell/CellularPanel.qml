@@ -2596,7 +2596,7 @@ Column {
                     anchors.bottom: parent.bottom
                     anchors.rightMargin: Style.space(8)
                     anchors.bottomMargin: Style.space(5)
-                    text: simTile.modelData.kind === "esim" ? "󱤓" : "󰒧"
+                    text: simTile.modelData.kind === "physical" ? "󰒧" : "󱤓"
                     color: root.barForeground
                     opacity: simTile.isActive ? 0.7 : 0.35
                     font.family: root.fontFamily
@@ -2644,7 +2644,7 @@ Column {
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.margins: Style.space(4)
-                    text: simTile.modelData.kind === "esim" ? "eSIM" : "physical"
+                    text: simTile.modelData.kind === "physical" ? "physical" : "eSIM"
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -2656,7 +2656,9 @@ Column {
                     anchors.leftMargin: Style.space(4)
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: Style.space(3)
-                    text: "····" + String(simTile.modelData.iccid || "").slice(-4)
+                    text: simTile.modelData.iccid
+                          ? "····" + String(simTile.modelData.iccid).slice(-4)
+                          : "no profiles"
                     color: root.barForeground
                     opacity: 0.5
                     font.family: root.fontFamily
@@ -2668,13 +2670,22 @@ Column {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: simTile.isActive ? Qt.ArrowCursor : Qt.PointingHandCursor
-                    onClicked: if (!simTile.isActive)
-                                 root.runAction([root.cli, "use", simTile.modelData.iccid])
+                    onClicked: {
+                      if (simTile.isActive) return
+                      // A bare eUICC has no profile to 'use'; selecting its
+                      // slot is the bootstrap that makes Manage reachable.
+                      if (simTile.modelData.kind === "esim-slot")
+                        root.runAction([root.cli, "sim", simTile.modelData.slot, "--force"])
+                      else
+                        root.runAction([root.cli, "use", simTile.modelData.iccid])
+                    }
                   }
 
                   PanelToolTip {
                     visible: tileArea.containsMouse && !simTile.isActive
-                    text: "Switch to this card; the modem reconnects"
+                    text: simTile.modelData.kind === "esim-slot"
+                          ? "Select the eSIM slot; add profiles from Manage eSIM"
+                          : "Switch to this card; the modem reconnects"
                     fontFamily: root.fontFamily
                   }
                 }
