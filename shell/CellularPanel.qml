@@ -282,12 +282,25 @@ Panel {
   readonly property string physicalSlot: esimSlot === "1" ? "2" : "1"
   function slotHasCard(slot) { return info["slot" + slot + "_sim"] !== "no" }
   readonly property real usedFraction: limitBytes > 0 ? Math.min(1, usedBytes / limitBytes) : 0
+  // Where "today" sits in the billing cycle. Usage left of this tick is
+  // under pace; right of it is burning ahead of the calendar.
+  readonly property real cycleFraction: {
+    var st = Date.parse(info.period_start || "")
+    var en = Date.parse(info.next_reset || "")
+    if (isNaN(st) || isNaN(en) || en <= st) return -1
+    return Math.min(1, Math.max(0, (Date.now() - st) / (en - st)))
+  }
   readonly property string nextResetLabel: {
     if (!info.next_reset) return ""
     var d = new Date(info.next_reset + "T00:00:00")
     if (isNaN(d.getTime())) return ""
     return "Resets " + Qt.formatDate(d, "MMM d")
   }
+  // When the meter began counting -- distinct from when the period began.
+  // Shown as the CLI records it: a timestamp, because it pairs with the
+  // reset control and that is the moment it captures.
+  readonly property string startedLabel:
+    info.counting_since ? "Started " + info.counting_since : ""
 
   function capitalise(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : v }
 
@@ -801,19 +814,29 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            Button {
+            // A link, like Reset counter below: the section's controls are
+            // quiet, and a bordered button here read as the main event.
+            Text {
+              textFormat: Text.PlainText
               id: planButton
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              text: root.limitBytes > 0 ? "Change" : "Set limit"
-              fontSize: Style.font.caption
-              bordered: true
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              active: root.limitEditing
-              onClicked: {
-                root.limitEditing = !root.limitEditing
-                if (root.limitEditing) root.seedLimitFields()
+              text: root.limitEditing ? "Done" : (root.limitBytes > 0 ? "Change" : "Set limit")
+              color: root.barForeground
+              opacity: planArea.containsMouse || root.limitEditing ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: planArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.limitEditing = !root.limitEditing
+                  if (root.limitEditing) root.seedLimitFields()
+                }
               }
             }
           }
@@ -839,6 +862,19 @@ Panel {
               width: Math.max(planTrack.height, planTrack.width * root.usedFraction)
               color: root.usedFraction >= 0.9 ? root.urgent : root.barForeground
               Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+            }
+
+            // The calendar's position in the cycle, so pace reads as geometry:
+            // fill short of the tick is under pace.
+            Rectangle {
+              visible: root.cycleFraction >= 0
+              x: Math.min(planTrack.width - width, planTrack.width * root.cycleFraction)
+              anchors.verticalCenter: planTrack.verticalCenter
+              width: 3
+              height: planTrack.height + Style.space(6)
+              radius: 1
+              color: root.barForeground
+              opacity: 0.9
             }
           }
 
@@ -928,7 +964,7 @@ Panel {
                     verticalPadding: Style.space(2)
                     // Seeded on open, not bound: a binding to root.info is
                     // re-asserted on every status poll and overwrites typing.
-                    placeholderText: "5G, 500M; blank for off"
+                    placeholderText: "5G, 500M — blank turns it off"
                     foreground: root.barForeground
                     onAccepted: {
                       var v = text.trim()
@@ -978,6 +1014,16 @@ Panel {
 
 
 
+              SwitchRow {
+                width: parent.width
+                visible: root.limitBytes > 0
+                label: "STOP DATA AT LIMIT"
+                tip: "Off, it only warns; re-arms when the period resets"
+                checked: !root.limitAck
+                onFlipped: root.runAction([root.cli, "limit", "cutoff",
+                                           root.limitAck ? "on" : "off"])
+              }
+
               // Zeroes the counter, and on a fixed-length bundle restarts the
               // window: topping up buys new days as well as new bytes.
               Item {
@@ -988,8 +1034,8 @@ Panel {
                   textFormat: Text.PlainText
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
-                  visible: root.info.period === "days" && root.info.period_start
-                  text: "Started " + root.info.period_start
+                  visible: root.startedLabel !== ""
+                  text: root.startedLabel
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption

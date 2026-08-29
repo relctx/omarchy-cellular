@@ -867,7 +867,7 @@ meter_update() {
   mkdir -p "$STATE_DIR"
   period_bounds
 
-  local uf u_start="" u_end="" u_rx=0 u_tx=0 u_ack=0 k v
+  local uf u_start="" u_end="" u_rx=0 u_tx=0 u_ack=0 u_since="" k v
   uf=$(usage_file)
   if [[ -r $uf ]]; then
     while IFS='=' read -r k v; do
@@ -877,14 +877,21 @@ meter_update() {
       rx) u_rx=$v ;;
       tx) u_tx=$v ;;
       ack) u_ack=$v ;;
+      since) u_since=$v ;;
       esac
     done <"$uf"
   fi
+
+  # When counting began -- distinct from when the billing period began, and
+  # timestamped: it pairs with the reset control, which is exactly the moment
+  # it records.
+  [[ -n $u_since ]] || u_since=$(date '+%F %H:%M')
 
   # Reset when the stored end date has arrived. Changing the renewal day or
   # the period type moves the start date too, and that is not a renewal.
   if [[ -n $u_end && $(date +%F) > $u_end ]]; then
     u_rx=0 u_tx=0 u_ack=0
+    u_since=$(date '+%F %H:%M')
   fi
 
   local snap="$STATE_DIR/counter" s_iccid="" s_rx=0 s_tx=0 cur_iccid
@@ -925,8 +932,9 @@ meter_update() {
     printf 'iccid=%s\nrx=%s\ntx=%s\n' "$cur_iccid" "$cur_rx" "$cur_tx" >"$snap"
   fi
 
-  printf 'period_start=%s\nperiod_end=%s\nrx=%s\ntx=%s\nack=%s\n' \
-    "$PERIOD_START" "$PERIOD_NEXT" "$u_rx" "$u_tx" "$u_ack" >"$uf"
+  printf 'period_start=%s\nperiod_end=%s\nrx=%s\ntx=%s\nack=%s\nsince=%s\n' \
+    "$PERIOD_START" "$PERIOD_NEXT" "$u_rx" "$u_tx" "$u_ack" "$u_since" >"$uf"
+  METER_SINCE=$u_since
 
   USED_BYTES=$((u_rx + u_tx))
   LIMIT_BYTES=$(limit_bytes)
@@ -961,6 +969,26 @@ cmd_limit() {
     fi
     ;;
   off) set_cfg DATA_LIMIT off && echo "Data limit disabled." ;;
+  cutoff)
+    # ack=1 is "the user connected past the limit on purpose"; the switch is
+    # the same fact made settable. It re-arms itself when the period resets.
+    read_state
+    meter_update >/dev/null 2>&1
+    case "${2:-}" in
+    on)
+      sed -i 's/^ack=.*/ack=0/' "$(usage_file)"
+      echo "Data stops when the limit is reached."
+      ;;
+    off)
+      sed -i 's/^ack=.*/ack=1/' "$(usage_file)"
+      echo "The limit only warns for the rest of this period."
+      ;;
+    *)
+      echo "usage: omarchy-cellular limit cutoff on|off" >&2
+      return 2
+      ;;
+    esac
+    ;;
   day)
     [[ ${2:-} =~ ^[0-9]+$ ]] && ((10#$2 >= 1 && 10#$2 <= 31)) || {
       echo "usage: omarchy-cellular limit day <1-31>" >&2
@@ -1698,9 +1726,8 @@ cmd_panel() {
   printf 'period=%s\n' "$(get_cfg DATA_PERIOD | grep . || echo monthly)"
   printf 'next_reset=%s\n' "$PERIOD_NEXT"
   printf 'period_start=%s\n' "$PERIOD_START"
+  printf 'counting_since=%s\n' "${METER_SINCE:-}"
   printf 'reset_day=%s\n' "$(get_cfg DATA_RESET_DAY | grep . || echo 1)"
-  printf 'plan_start=%s\n' "$PERIOD_START"
-  printf 'plan_end=%s\n' "$PERIOD_NEXT"
   printf 'period_days=%s\n' "$(get_cfg DATA_DAYS | grep . || echo 30)"
   printf 'limit_ack=%s\n' "$LIMIT_ACK"
 
@@ -3099,7 +3126,7 @@ usage: omarchy-cellular <command>
   profile ...         eSIM profiles: list, enable, delete, nickname, download, scan
   esim-session        one authorization, then profile commands on stdin (the panel)
   carrier ...         pick country/carrier and apply its APN (see: carrier)
-  limit ...           monthly/daily data cap with auto-cutoff (see: limit)
+  limit ...           per-card data cap: amount, period, cutoff (see: limit)
   apn <name>          set the APN by hand
   apn list            APNs the carrier provisioned into the modem
   autoconnect on|off  connect automatically at boot
