@@ -380,6 +380,7 @@ nm_preflight() {
 # feedback. A registration that will succeed does so well inside this.
 NM_UP_WAIT="${OMARCHY_CELLULAR_WAIT:-45}"
 nm_up() {
+  rm -f "$STATE_DIR/user-off"
   nm_apply && nm_preflight &&
     nmcli --wait "$NM_UP_WAIT" connection up "$NM_CONN" >/dev/null
 }
@@ -520,6 +521,7 @@ read_state() {
   case $mstate in
   connected)
     STATE=connected
+    rm -f "$STATE_DIR/user-off"
     IFACE=$(sed -n 's/^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (net)$/\1/p' <<<"$dump" | head -1)
     [[ -n $IFACE ]] && IPADDR=$(ip -4 -br addr show "$IFACE" 2>/dev/null | awk '{print $3}')
     ;;
@@ -545,6 +547,11 @@ read_state() {
 signal_icon() {
   case $STATE in
   absent | disabled | locked | nosim) printf '\U000F0783' ;;
+  registered)
+    # Disconnected on purpose reads as off; the outline below is for a
+    # connection that dropped or has not come up.
+    if [[ -f $STATE_DIR/user-off ]]; then printf '\U000F0783'; else printf '\U000F08BF'; fi
+    ;;
   searching) printf '\U000F08BF' ;;
   connected)
     # Never the outline while data flows: a weak cell reads 0% often, and
@@ -797,7 +804,7 @@ meter_update() {
 
   if ((LIMIT_BYTES > 0 && USED_BYTES >= LIMIT_BYTES && LIMIT_ACK == 0)) &&
     [[ ${STATE:-} == connected ]]; then
-    if nm_down; then
+    if touch "$STATE_DIR/user-off" && nm_down; then
       omarchy-notification-send -g "󰢿" -u critical "Data limit reached" \
         "Used $(fmt_bytes "$USED_BYTES") of $(fmt_bytes "$LIMIT_BYTES") — cellular disconnected. Reconnect manually to keep using data this period." 2>/dev/null ||
         notify "Data limit reached — cellular disconnected"
@@ -1628,6 +1635,9 @@ cmd_connect() {
 }
 
 cmd_disconnect() {
+  # Off by choice is its own bar state: the outline is reserved for a
+  # connection that should exist and does not.
+  mkdir -p "$STATE_DIR" && touch "$STATE_DIR/user-off"
   nm_down && notify "Disconnected"
 }
 
