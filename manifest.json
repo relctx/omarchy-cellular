@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "relctx.cellular",
   "name": "Cellular",
-  "version": "1.0.1",
+  "version": "1.1",
   "author": "relctx",
   "license": "MIT",
   "description": "Cellular (WWAN) indicator and controls for Omarchy",
