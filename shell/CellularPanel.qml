@@ -325,11 +325,14 @@ Panel {
     return "Working…"
   }
 
+  // Returns false when another action holds the slot, so callers that clear
+  // their own input can keep it instead of dropping it on the floor.
   function runAction(cmd) {
-    if (actionProc.running) return
+    if (actionProc.running) return false
     root.busyLabel = root.labelFor(cmd)
     actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
     actionProc.running = true
+    return true
   }
 
   function toggleData() {
@@ -747,7 +750,8 @@ Panel {
                     foreground: root.barForeground
                     onAccepted: {
                       var v = text.trim()
-                      root.runAction([root.cli, "limit", v === "" ? "off" : v])
+                      if (!root.runAction([root.cli, "limit", v === "" ? "off" : v]))
+                        return
                       root.limitEditing = false
                     }
                   }
@@ -909,6 +913,7 @@ Panel {
             // Whatever the label leaves, less a gap so the two never touch.
             readonly property real avail: Math.max(0, parent.width - modeLabel.implicitWidth - Style.space(10))
             readonly property real cellWidth: (avail - spacing * (root.modeChips.length - 1)) / Math.max(1, root.modeChips.length)
+            enabled: !root.busy
             opacity: root.busy ? 0.5 : 1
 
             Repeater {
@@ -1070,9 +1075,12 @@ Panel {
               width: parent.width
               placeholderText: "APN — blank lets the network choose"
               foreground: root.barForeground
+              enabled: !root.busy
+              opacity: root.busy ? 0.5 : 1
               onAccepted: {
+                if (!root.runAction(["sh", "-c", JSON.stringify(root.cli) + " apn " + JSON.stringify(text) + " && " + JSON.stringify(root.cli) + " apply"]))
+                  return
                 root.apnEditing = false
-                root.runAction(["sh", "-c", JSON.stringify(root.cli) + " apn " + JSON.stringify(text) + " && " + JSON.stringify(root.cli) + " apply"])
               }
             }
           }
@@ -1253,8 +1261,8 @@ Panel {
             readonly property real usable: width - spacing * (cells - 1)
             readonly property real cellWidth: cells === 3 ? usable * 0.28 : usable / 2
             readonly property real wideWidth: usable - cellWidth * 2
-            // A slot switch is in flight; dim the row so swallowed clicks read
-            // as busy.
+            // A slot switch is in flight; the row is unavailable until it lands.
+            enabled: !root.busy
             opacity: root.busy ? 0.5 : 1
 
             Button {
@@ -1447,11 +1455,12 @@ Panel {
                   Keys.onEscapePressed: { root.renamingIccid = ""; text = "" }
                   onAccepted: {
                     var target = root.renamingIccid
-                    root.renamingIccid = ""
                     if (target !== "" && text.trim() !== "") {
-                      root.runAction([root.cli, "profile", "nickname", target, text.trim()])
+                      if (!root.runAction([root.cli, "profile", "nickname", target, text.trim()]))
+                        return
                       root.applyProfileChange(target, "rename", text.trim())
                     }
+                    root.renamingIccid = ""
                     text = ""
                   }
                 }
@@ -1547,11 +1556,12 @@ Panel {
                     text = ""
                   }
                   onAccepted: {
-                    root.addingProfile = false
                     if (text.trim() !== "") {
-                      root.runAction([root.cli, "profile", "download", text.trim()])
+                      if (!root.runAction([root.cli, "profile", "download", text.trim()]))
+                        return
                       root.profileError = "Downloaded. Refresh to see it."
                     }
+                    root.addingProfile = false
                     text = ""
                   }
                 }
