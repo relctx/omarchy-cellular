@@ -2519,19 +2519,18 @@ cmd_sim() {
   # failed rather than reporting a bare non-zero.
   if [[ -n $idx ]]; then
     echo "Switching to SIM slot $slot (this reconnects the modem)…"
-    if esim_run "$slot" 0 &&
-      { cache_flush; card_wait_resolvable; nm_apply; } &&
-      { ! nm_is_active || nm_up; }; then
-      read_state
-      notify "SIM slot $slot active — ${OPERATOR:-connected}"
-      cmd_status
-    else
-      # The slot may have switched and the connect after it failed. An empty
-      # slot (blank eSIM) is the usual reason.
+    # Whether to reconnect afterwards is decided by how things were before:
+    # after the switch the connection is always down.
+    local was_active=0
+    nm_is_active && was_active=1
+
+    if ! esim_run "$slot" 0; then
+      # The switch itself failed. An empty slot (blank eSIM) is the usual
+      # reason.
       read_state
       if [[ $STATE == nosim ]]; then
         cmd_status
-        if [[ $ACTIVE_SLOT == 2 ]]; then
+        if [[ $ACTIVE_SLOT == "$(esim_slot || echo 2)" ]]; then
           notify "eSIM is empty — no profile installed. Cellular stays off until you switch back or install one."
         else
           notify "SIM slot ${ACTIVE_SLOT:-$slot} is empty"
@@ -2542,6 +2541,27 @@ cmd_sim() {
       notify "SIM slot switch failed — see: omarchy-cellular log"
       return 1
     fi
+
+    # The switch is done; nothing after this can make that untrue, so the
+    # verdicts split. The card's own settings go on before any reconnect.
+    cache_flush
+    card_wait_resolvable
+    nm_apply >/dev/null 2>&1 || true
+    read_state
+    notify "SIM slot $slot active${SIM_OPERATOR:+ — $SIM_OPERATOR}"
+
+    if ((was_active)); then
+      if nm_up; then
+        read_state
+        notify "Connected to ${OPERATOR:-cellular network}"
+      else
+        # The modem is often still settling here; the switch is fine.
+        echo "Switched, but reconnecting has not finished. It may settle on its own, or:" >&2
+        echo "    omarchy-cellular connect" >&2
+        notify "SIM switched — reconnect pending"
+      fi
+    fi
+    cmd_status
   else
     echo "Saved SIM_SLOT=$slot. Run 'omarchy-cellular apply' to switch."
   fi
