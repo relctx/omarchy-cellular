@@ -2003,13 +2003,18 @@ cmd_use() {
   }
   echo "Switching to that profile (this reconnects the modem)…"
   esim_run "$eslot" 1 profile enable "$want" true || return 1
-  jq -e '.payload.code == 0' <<<"$ESIM_JSON" >/dev/null 2>&1 || {
+  if ! jq -e '.payload.code == 0' <<<"$ESIM_JSON" >/dev/null 2>&1; then
     local why
     why=$(jq -r '.payload.data // .payload.message // empty' <<<"$ESIM_JSON" 2>/dev/null | head -1)
-    echo "Could not enable that profile${why:+ — $why}." >&2
-    notify "Profile switch failed${why:+ — $why}"
-    return 1
-  }
+    # Already the enabled profile: the click meant "switch to the eSIM", the
+    # slot switch inside the session did that, and the redundant enable being
+    # refused is the success case wearing an error.
+    if [[ $why != *"not in disabled state"* ]]; then
+      echo "Could not enable that profile${why:+ — $why}." >&2
+      notify "Profile switch failed${why:+ — $why}"
+      return 1
+    fi
+  fi
   [[ -n $ESIM_LIST_JSON ]] && profiles_render "$ESIM_LIST_JSON" >/dev/null
 
   sim_follow_profile "$want"
