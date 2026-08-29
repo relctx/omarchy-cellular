@@ -994,14 +994,26 @@ at_port() {
 #   ATI                     model and firmware
 #   AT+CSQ                  signal strength, raw
 #   AT+COPS?                registered operator
-#   AT+CPIN?                SIM lock state
-#   AT+CGDCONT?             the modem's PDP context table, which MBIM does not expose
+#   AT+CGDCONT?             the modem's PDP context table, which MBIM does not
+#                           expose -- the source 'apn list' cannot reach
 #   AT+CGACT?               which of those contexts are active
 #   AT+CEREG?               LTE registration state
 #   AT+C5GREG?              5G registration state
 #   AT+CFUN?                radio power state
 #   AT+QNWINFO              band and channel (Quectel)
 #   AT+QENG="servingcell"   serving cell detail (Quectel)
+#
+# SIM PIN. ModemManager does all of this over D-Bus without taking the port,
+# and PIN= in cellular.conf is handed to NetworkManager, so reach for these
+# only when the supported route has failed. Three wrong PINs lock the card
+# until it is given the PUK, and a wrong PUK can destroy it outright:
+#   AT+CPIN?                lock state: READY, SIM PIN, SIM PUK
+#   AT+CPIN="1234"          enter the PIN for this power cycle
+#   AT+CLCK="SC",2          whether the PIN is demanded at power-on
+#   AT+CLCK="SC",1,"1234"   demand it at power-on
+#   AT+CLCK="SC",0,"1234"   stop demanding it
+#   AT+CPWD="SC","old","new"  change it
+#   AT+CPIN="puk","newpin"  unblock a locked card with the PUK
 cmd_at() {
   local idx dump port
   [[ -n ${1:-} ]] || {
@@ -1085,6 +1097,9 @@ cmd_apn_list() {
     else
       echo "None is configured, so the network chooses -- which is what an eSIM expects." >&2
     fi
+    echo >&2
+    echo "The modem's own PDP context table is not on the bus. To see it:" >&2
+    echo "    omarchy-cellular at 'AT+CGDCONT?'" >&2
     return 1
   fi
 
