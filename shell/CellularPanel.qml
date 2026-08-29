@@ -1568,12 +1568,9 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
-          // What is in the slot, beside the title. The card's provider, not the
-          // network operator: an Airalo profile roaming on Verizon reads
-          // "Airalo" here and "Verizon Wireless" in the hero.
           Item {
             width: parent.width
-            implicitHeight: Math.max(simHeader.implicitHeight, simWho.implicitHeight)
+            implicitHeight: Math.max(simHeader.implicitHeight, manageLink.implicitHeight)
 
             PanelSectionHeader {
               id: simHeader
@@ -1586,19 +1583,38 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              id: simWho
+              id: manageLink
               anchors.right: parent.right
               anchors.verticalCenter: simHeader.verticalCenter
               anchors.verticalCenterOffset: Math.round(simHeader.topPadding / 2)
-              width: Math.max(0, parent.width - simHeader.implicitWidth - Style.space(10))
-              horizontalAlignment: Text.AlignRight
-              elide: Text.ElideRight
-              text: ""
-              visible: false
+              text: root.esimExpanded ? "Close eSIM management" : "Manage eSIM…"
               color: root.barForeground
-              opacity: 0
+              opacity: !root.esimSelected ? 0.35
+                       : manageArea.containsMouse || root.esimExpanded ? 1 : 0.6
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: manageArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                enabled: root.esimSelected
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.esimExpanded = !root.esimExpanded
+                  if (root.esimExpanded) root.loadProfiles()
+                  else root.sessionStop()
+                }
+              }
+
+              PanelToolTip {
+                visible: manageArea.containsMouse
+                text: root.esimSelected
+                      ? "Rename, add, or remove eSIM profiles"
+                      : "Select the eSIM first to manage its profiles"
+                fontFamily: root.fontFamily
+              }
             }
           }
 
@@ -1610,24 +1626,146 @@ Column {
             enabled: !root.busy
             opacity: root.busy ? 0.5 : 1
 
-            Repeater {
-              model: root.sims
-              delegate: Button {
-                required property var modelData
-                readonly property bool isActive: modelData.active === "yes"
-                width: simList.width
-                fontSize: Style.font.caption
-                verticalPadding: Style.space(3)
-                iconSize: Style.font.bodySmall
-                iconText: modelData.kind === "esim" ? "󱤓" : "󰒧"
-                text: root.shortLabel(modelData.name || modelData.provider,
-                                      modelData.provider, modelData.iccid)
-                bordered: true
-                active: isActive
-                foreground: root.barForeground
-                fontFamily: root.fontFamily
-                tooltipText: isActive ? "" : "Switch to this card; the modem reconnects"
-                onClicked: if (!isActive) root.runAction([root.cli, "use", modelData.iccid])
+            Flow {
+              id: simFlow
+              width: parent.width
+              spacing: Style.space(7)
+
+              Repeater {
+                model: root.sims
+                delegate: Item {
+                  id: simTile
+                  required property var modelData
+                  readonly property bool isActive: modelData.active === "yes"
+                  width: (simFlow.width - Style.space(7)) / 2
+                  height: Math.round(Style.font.body * 5.4)
+                  // The bevel that makes a rectangle read as a SIM card.
+                  readonly property real notch: Math.round(Style.font.body * 1.1)
+
+                  Canvas {
+                    anchors.fill: parent
+                    property color line: root.barForeground
+                    property bool on: simTile.isActive
+                    opacity: on ? 0.9 : tileArea.containsMouse ? 0.55 : 0.3
+                    onLineChanged: requestPaint()
+                    onOnChanged: requestPaint()
+                    onPaint: {
+                      var ctx = getContext("2d")
+                      ctx.reset()
+                      var w = width - 1, h = height - 1
+                      var r = Math.max(0, Style.cornerRadius)
+                      var n = simTile.notch
+                      ctx.translate(0.5, 0.5)
+                      ctx.beginPath()
+                      ctx.moveTo(n, 0)
+                      ctx.lineTo(w - r, 0)
+                      ctx.arcTo(w, 0, w, r, r)
+                      ctx.lineTo(w, h - r)
+                      ctx.arcTo(w, h, w - r, h, r)
+                      ctx.lineTo(r, h)
+                      ctx.arcTo(0, h, 0, h - r, r)
+                      ctx.lineTo(0, n)
+                      ctx.closePath()
+                      if (on) {
+                        ctx.fillStyle = Qt.rgba(line.r, line.g, line.b, 0.12)
+                        ctx.fill()
+                      }
+                      ctx.strokeStyle = line
+                      ctx.lineWidth = 1
+                      ctx.stroke()
+                    }
+                  }
+
+                  // With the notch top-left, the contact pad reads right:
+                  // glyph bottom-right, like the real card.
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.rightMargin: Style.space(8)
+                    anchors.bottomMargin: Style.space(5)
+                    text: simTile.modelData.kind === "esim" ? "󱤓" : "󰒧"
+                    color: root.barForeground
+                    opacity: simTile.isActive ? 0.7 : 0.35
+                    font.family: root.fontFamily
+                    font.pixelSize: Math.round(Style.font.body * 2)
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: tileName
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(4)
+                    anchors.leftMargin: simTile.notch + Style.space(2)
+                    anchors.right: tileKind.left
+                    anchors.rightMargin: Style.space(3)
+                    elide: Text.ElideRight
+                    text: simTile.modelData.name || simTile.modelData.provider || "Unnamed"
+                    color: root.barForeground
+                    opacity: simTile.isActive ? 1 : 0.8
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.leftMargin: simTile.notch + Style.space(2)
+                    anchors.top: tileName.bottom
+                    anchors.topMargin: Style.space(1)
+                    anchors.right: parent.horizontalCenter
+                    elide: Text.ElideRight
+                    visible: text !== ""
+                    text: simTile.modelData.provider
+                          && simTile.modelData.provider !== simTile.modelData.name
+                          ? simTile.modelData.provider : ""
+                    color: root.barForeground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: tileKind
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(4)
+                    text: simTile.modelData.kind === "esim" ? "eSIM" : "physical"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(4)
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: Style.space(3)
+                    text: "····" + String(simTile.modelData.iccid || "").slice(-4)
+                    color: root.barForeground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: tileArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: simTile.isActive ? Qt.ArrowCursor : Qt.PointingHandCursor
+                    onClicked: if (!simTile.isActive)
+                                 root.runAction([root.cli, "use", simTile.modelData.iccid])
+                  }
+
+                  PanelToolTip {
+                    visible: tileArea.containsMouse && !simTile.isActive
+                    text: "Switch to this card; the modem reconnects"
+                    fontFamily: root.fontFamily
+                  }
+                }
               }
             }
 
@@ -1647,45 +1785,45 @@ Column {
             // answers while it is the selected card.
             Item {
               width: parent.width
-              height: manageLink.implicitHeight + Style.space(4)
+              visible: root.esimExpanded
+              height: refreshLink.implicitHeight + Style.space(4)
 
               Text {
                 textFormat: Text.PlainText
-                id: manageLink
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(4)
+                id: refreshLink
+                visible: root.esimExpanded
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(4)
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.esimExpanded ? "Close eSIM management" : "Manage eSIM…"
+                text: root.profilesStale ? "Refresh · after scan" : "Refresh"
                 color: root.barForeground
-                opacity: !root.esimSelected ? 0.35
-                         : manageArea.containsMouse || root.esimExpanded ? 1 : 0.6
+                opacity: root.profilesStale ? 1
+                         : refreshArea.containsMouse ? 1 : 0.6
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
 
                 MouseArea {
-                  id: manageArea
+                  id: refreshArea
                   anchors.fill: parent
                   anchors.margins: -Style.space(4)
                   hoverEnabled: true
-                  enabled: root.esimSelected
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
-                    root.esimExpanded = !root.esimExpanded
-                    // The one authorization is spent here, on opening the
-                    // list. Closing it ends the elevated half.
-                    if (root.esimExpanded) root.loadProfiles()
-                    else root.sessionStop()
+                    root.profilesStale = false
+                    root.profiles = []
+                    root.loadProfiles()
                   }
                 }
 
                 PanelToolTip {
-                  visible: manageArea.containsMouse
-                  text: root.esimSelected
-                        ? "Rename, add, or remove eSIM profiles"
-                        : "Select the eSIM first to manage its profiles"
+                  visible: refreshArea.containsMouse
+                  text: root.profilesStale
+                        ? "A scan ran; re-read the eSIM to see what it installed"
+                        : "Re-read profiles from the eSIM"
                   fontFamily: root.fontFamily
                 }
               }
+
             }
           }
         }
@@ -1702,6 +1840,14 @@ Column {
               id: esimCol
               width: parent.width
               spacing: Style.space(6)
+
+              PanelSeparator { foreground: root.barForeground }
+
+              PanelSectionHeader {
+                text: "ESIM PROFILES"
+                foreground: root.barForeground
+                fontFamily: root.fontFamily
+              }
 
               Text {
                 textFormat: Text.PlainText
@@ -1729,81 +1875,204 @@ Column {
 
               Repeater {
                 model: root.profiles
-                Row {
-                  id: profileRow
+                Item {
+                  id: profileCard
                   required property var modelData
+                  readonly property bool isOn: root.profileEnabled(modelData)
                   width: esimCol.width
-                  spacing: Style.space(4)
-                  // Explicit chip width: Button.implicitWidth includes its
-                  // horizontal padding, so `width: height` does not actually
-                  // make a square and the last chip lands off the panel.
-                  readonly property real chip: Style.font.body * 2
+                  height: cardCol.implicitHeight + Style.space(8)
 
-                  Button {
-                    id: profileName
-                    width: profileRow.width - profileRow.spacing * 2 - profileRow.chip * 2
-                    height: addBtn.height
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.space(2)
-                    text: root.shortLabel(modelData.name, modelData.provider,
-                                          modelData.iccid)
-                    tooltipText: (root.profileEnabled(modelData)
-                      ? "Active profile" : "Switch to this profile")
-                      + (modelData.class === "test" ? " (test profile)" : "")
-                    bordered: true
-                    active: root.profileEnabled(modelData)
-                    // Never dim the enabled one; stacked with the selected fill
-                    // it cancels the highlight out.
-                    opacity: modelData.class === "test"
-                      && !root.profileEnabled(modelData) ? 0.6 : 1
-                    foreground: root.barForeground
-                    fontFamily: root.fontFamily
-                    onClicked: if (!root.profileEnabled(modelData)) {
+                  Rectangle {
+                    anchors.fill: parent
+                    // The theme's own corner treatment, like every Button.
+                    radius: Style.cornerRadius
+                    color: "transparent"
+                    border.color: root.barForeground
+                    border.width: 1
+                    opacity: profileCard.isOn ? 0.8
+                             : cardArea.containsMouse ? 0.55 : 0.3
+                  }
+
+                  // Status rail: state runs vertically along the card's edge.
+                  // INACTIVE does not fit two lines of card, so a quiet rail
+                  // with no word is the inactive state.
+                  Item {
+                    id: statusRail
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 1
+                    width: Math.round(Style.font.caption * 2)
+
+                    // The rail itself is the highlight: filled when active,
+                    // near-silent when not.
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: Math.max(0, Style.cornerRadius - 1)
+                      color: root.barForeground
+                      opacity: profileCard.isOn ? 0.22 : 0.05
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.centerIn: parent
+                      rotation: -90
+                      // Rotated, the text's width runs along the card's height;
+                      // cap it there and let the size fit, so the word never
+                      // reaches the box edges.
+                      width: parent.height - Style.space(8)
+                      height: parent.width
+                      horizontalAlignment: Text.AlignHCenter
+                      verticalAlignment: Text.AlignVCenter
+                      fontSizeMode: Text.HorizontalFit
+                      minimumPixelSize: 6
+                      text: profileCard.isOn ? "ACTIVE"
+                            : profileCard.modelData.class === "test" ? "TEST" : ""
+                      color: root.barForeground
+                      opacity: profileCard.isOn ? 1 : 0.5
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.letterSpacing: 1
+                    }
+                  }
+
+                  MouseArea {
+                    id: cardArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: profileCard.isOn ? Qt.ArrowCursor : Qt.PointingHandCursor
+                    onClicked: if (!profileCard.isOn) {
                       root.sessionSend("enable " + modelData.iccid)
                       root.applyProfileChange(modelData.iccid, "enable")
                     }
                   }
 
-                  Button {
-                    width: profileRow.chip
-                    height: addBtn.height
-                    iconSize: Style.font.caption
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.space(2)
-                    horizontalPadding: Style.space(2)
-                    iconText: "󰑕"
-                    tooltipText: "Rename"
-                    bordered: true
-                    foreground: root.barForeground
-                    fontFamily: root.fontFamily
-                    onClicked: {
-                      root.renamingIccid = root.renamingIccid === modelData.iccid
-                        ? "" : modelData.iccid
-                      if (root.renamingIccid !== "") {
-                        renameField.text = modelData.name || ""
-                        renameField.forceActiveFocus()
-                      }
-                    }
-                  }
+                  Column {
+                    id: cardCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: statusRail.width + Style.space(6)
+                    anchors.rightMargin: Style.space(6)
+                    spacing: Style.space(2)
 
-                  Button {
-                    width: profileRow.chip
-                    height: addBtn.height
-                    iconSize: Style.font.caption
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.space(2)
-                    horizontalPadding: Style.space(2)
-                    iconText: "󰩹"
-                    tooltipText: root.profileEnabled(modelData)
-                      ? "Can't delete the active profile — switch to another first"
-                      : "Delete this profile"
-                    bordered: true
-                    opacity: root.profileEnabled(modelData) ? 0.4 : 1
-                    foreground: root.barForeground
-                    fontFamily: root.fontFamily
-                    onClicked: if (!root.profileEnabled(modelData)) {
-                      root.sessionSend("delete " + modelData.iccid)
-                      root.applyProfileChange(modelData.iccid, "delete")
+                    Item {
+                      width: parent.width
+                      height: iccidText.implicitHeight
+
+                      Text {
+                        textFormat: Text.PlainText
+                        id: iccidText
+                        anchors.left: parent.left
+                        text: profileCard.modelData.iccid
+                        color: root.barForeground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+
+                    }
+
+                    Item {
+                      width: parent.width
+                      height: Math.max(nameText.implicitHeight, cardActions.implicitHeight)
+
+                      Text {
+                        textFormat: Text.PlainText
+                        id: nameText
+                        anchors.left: parent.left
+                        anchors.right: cardActions.left
+                        anchors.rightMargin: Style.space(4)
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideRight
+                        text: (profileCard.modelData.name || "Unnamed")
+                              + (profileCard.modelData.provider
+                                 && profileCard.modelData.provider !== profileCard.modelData.name
+                                 ? "  ·  " + profileCard.modelData.provider : "")
+                        color: root.barForeground
+                        opacity: 0.65
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Row {
+                        id: cardActions
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(8)
+
+                        Item {
+                          width: Math.round(Style.font.body * 2)
+                          height: width
+
+                          Text {
+                            textFormat: Text.PlainText
+                            anchors.centerIn: parent
+                            text: "󰑕"
+                            color: root.barForeground
+                            opacity: renameArea.containsMouse ? 1 : 0.55
+                            font.family: root.fontFamily
+                            font.pixelSize: Math.round(Style.font.body * 1.3)
+                          }
+
+                          MouseArea {
+                            id: renameArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              root.renamingIccid =
+                                root.renamingIccid === profileCard.modelData.iccid
+                                ? "" : profileCard.modelData.iccid
+                              if (root.renamingIccid !== "") {
+                                renameField.text = profileCard.modelData.name || ""
+                                renameField.forceActiveFocus()
+                              }
+                            }
+                          }
+
+                          PanelToolTip {
+                            visible: renameArea.containsMouse
+                            text: "Rename"
+                            fontFamily: root.fontFamily
+                          }
+                        }
+
+                        Item {
+                          width: Math.round(Style.font.body * 2)
+                          height: width
+
+                          Text {
+                            textFormat: Text.PlainText
+                            anchors.centerIn: parent
+                            text: "󰩹"
+                            color: root.barForeground
+                            opacity: profileCard.isOn ? 0.25
+                                     : deleteArea.containsMouse ? 1 : 0.55
+                            font.family: root.fontFamily
+                            font.pixelSize: Math.round(Style.font.body * 1.3)
+                          }
+
+                          MouseArea {
+                            id: deleteArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: !profileCard.isOn
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              root.sessionSend("delete " + profileCard.modelData.iccid)
+                              root.applyProfileChange(profileCard.modelData.iccid, "delete")
+                            }
+                          }
+
+                          PanelToolTip {
+                            visible: deleteArea.containsMouse
+                            text: profileCard.isOn
+                                  ? "The active profile cannot be deleted"
+                                  : "Delete this profile"
+                            fontFamily: root.fontFamily
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -1842,7 +2111,7 @@ Column {
                   // The height every other control in this area matches. Left
                   // to size itself; a formula misses the border reserve.
                   id: addBtn
-                  width: (esimCol.width - Style.space(4)) / 2
+                  width: esimCol.width
                   fontSize: Style.font.caption
                   verticalPadding: Style.space(2)
                   iconText: "󰐕"
@@ -1858,25 +2127,6 @@ Column {
                   }
                 }
 
-                Button {
-                  width: (esimCol.width - Style.space(4)) / 2
-                  fontSize: Style.font.caption
-                  verticalPadding: Style.space(2)
-                  iconText: "󰑐"
-                  text: root.profilesStale ? "Refresh · after scan" : "Refresh"
-                  tooltipText: root.profilesStale
-                    ? "A scan ran; re-read the eSIM to see what it installed"
-                    : "Re-read profiles from the eSIM"
-                  bordered: true
-                  active: root.profilesStale
-                  foreground: root.barForeground
-                  fontFamily: root.fontFamily
-                  onClicked: {
-                    root.profilesStale = false
-                    root.profiles = []
-                    root.loadProfiles()
-                  }
-                }
               }
 
               Item {
