@@ -1153,12 +1153,14 @@ read_signal() {
   idx=$(modem_index) || return 0
   [[ -n $idx ]] || return 0
 
-  # --signal-setup writes config; arm it once rather than on every refresh.
-  if [[ ! -f $STATE_DIR/signal-armed ]]; then
-    mmcli -m "$idx" --signal-setup="${OMARCHY_CELLULAR_SIGNAL_RATE:-5}" >/dev/null 2>&1 &&
-      : >"$STATE_DIR/signal-armed"
-  fi
+  # Polling belongs to the modem object, so a reset or a slot switch loses it.
+  # Read the rate back rather than remembering that it was set once: the modem
+  # this armed may not be the modem being asked now.
   out=$(mmcli -m "$idx" --signal-get 2>/dev/null) || return 0
+  if [[ $out == *"refresh rate: 0 seconds"* ]]; then
+    mmcli -m "$idx" --signal-setup="${OMARCHY_CELLULAR_SIGNAL_RATE:-5}" >/dev/null 2>&1 || return 0
+    out=$(mmcli -m "$idx" --signal-get 2>/dev/null) || return 0
+  fi
 
   # mmcli emits one block per access technology, and a modem that scanned 5G
   # keeps reporting an empty 5G block alongside the live LTE one. Prefer the
@@ -1188,7 +1190,7 @@ read_signal() {
     rssi) SIG_RSSI=$value ;;
     rsrp) SIG_RSRP=$value ;;
     rsrq) SIG_RSRQ=$value ;;
-    snr | sinr) SIG_SNR=$value ;;
+    snr | sinr | "s/n") SIG_SNR=$value ;;
     ecio) SIG_ECIO=$value ;;
     esac
   done <<<"$out"
