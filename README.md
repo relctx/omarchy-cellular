@@ -345,6 +345,39 @@ NetworkManager are left unmodified.
   raising a bearer, and the pre-flight clears them.
 - For diagnosis, run `omarchy-cellular doctor`, then `omarchy-cellular log`.
 
+## 2.0 changes
+
+For anyone coming from the 1.0.x marketplace build:
+
+- **eSIM without disruption.** Profile operations now run over the modem's MBIM or
+  QMI control port through lpac. The connection stays up; nothing is stopped. One
+  authorization covers a whole management session. This adds the `lpac-git`
+  requirement, and eSIM management degrades to an install hint without it.
+  Everything else works either way.
+- **AT transport removed** from every automatic path. The manual `at` command
+  remains for diagnostics.
+- **Event-driven panel.** ModemManager and NetworkManager signals drive updates;
+  polling survives only as a fallback. A SIM switch reports each stage.
+- **One SIM list.** The physical card and every eSIM profile appear as tiles;
+  one click switches, whatever that requires. CLI: `sims`, `use`.
+- **Per-card configuration and data plans.** APN, credentials, PIN and the data
+  plan move to `cellular.d/<iccid>.conf`, seeded automatically from the existing
+  config the first time each card is seen. Usage is metered per card, and a
+  transfer that straddles a card switch is credited to the card that used it.
+- **Cell diagnostics** behind one authorization: carriers in use with widths and
+  aggregation, then every cell the radio hears. CLI: `cells`, `signal`.
+- **Messages**: carrier texts read, notified and deleted. CLI: `sms`.
+- **Signal chart** with a selectable metric and window, and a display layout
+  preset from full stats down to hidden.
+- **Settings in the panel**, staged behind Save, stored in `cellular.conf`.
+  CLI: `settings`. A roaming switch joins the toggle row.
+- **Multi-modem support**: pick which modem the plugin drives; selection disables
+  the others and moves the connection with it. CLI: `devices`, `device`.
+- **Self-migration**: the first run after an update carries old settings forward,
+  cleans retired state, and posts one notification.
+- **Removed**: carrier code (USSD) sending, which ModemManager cannot do over
+  MBIM, and the menu-based pickers the panel replaced.
+
 ## Credits
 
 Forked from [Erruviel/omarchy-wwan](https://github.com/Erruviel/omarchy-wwan).
