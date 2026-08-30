@@ -1387,7 +1387,7 @@ Panel {
           readonly property real cellW: (width - columnSpacing) / 2
 
           // Reading order: signal and link quality, then identity, then
-          // transfer. The spacer keeps the transfer pairs on shared rows.
+          // transfer. Sixteen cells, so the transfer pairs share rows.
           InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
           InfoPair { width: parent.cellW; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
           InfoPair { width: parent.cellW; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
@@ -1405,8 +1405,6 @@ Panel {
             value: root.formatLoss(root.packetLoss)
             valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
           }
-          Item { width: parent.cellW; height: 1 }
-
           InfoPair { width: parent.cellW; label: "Technology"; value: root.info.tech || "—" }
           InfoPair {
             width: parent.cellW
@@ -1415,6 +1413,7 @@ Panel {
             valueColor: root.roaming ? root.urgent : root.barForeground
           }
           InfoPair { width: parent.cellW; label: "Operator"; value: root.info.operator || "—" }
+          InfoPair { width: parent.cellW; label: "Interface"; value: root.info.iface || "—" }
           InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
 
           InfoPair { width: parent.cellW; label: "Receiving"; value: root.hasTransferStats ? root.formatRate(root.downloadRate) : "--" }
