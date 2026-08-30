@@ -104,6 +104,11 @@ Panel {
     root.sessionArg = cmd.indexOf(" ") > 0 ? cmd.substring(cmd.indexOf(" ") + 1) : ""
     root.sessionLines = []
     root.profilesLoading = true
+    // The eUICC works for several seconds on a mutation; say so where the
+    // status line is, not only inside the Manage box.
+    if (root.sessionVerb === "enable") root.busyLabel = "Switching profile…"
+    else if (root.sessionVerb !== "list" && root.sessionVerb !== "chipinfo")
+      root.busyLabel = "Updating the eSIM…"
     sessionProc.write(cmd + "\n")
   }
 
@@ -137,6 +142,7 @@ Panel {
     root.sessionVerb = ""
     root.sessionLines = []
     root.profilesLoading = false
+    if (verb !== "list" && verb !== "chipinfo") root.busyLabel = ""
 
     if (verb === "list") {
       root.profiles = root.parseProfiles(lines.join("\n"))
@@ -864,6 +870,8 @@ Panel {
     stderr: StdioCollector { id: sessionErr; waitForEnd: true }
     onExited: function (code) {
       root.sessionReady = false
+      if (root.sessionVerb !== "" && root.sessionVerb !== "list" && root.sessionVerb !== "chipinfo"
+          && !actionProc.running) root.busyLabel = ""
       root.sessionVerb = ""
       root.sessionQueue = []
       root.profilesLoading = false
