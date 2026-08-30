@@ -2928,7 +2928,7 @@ Panel {
 
             TuneDrop {
               id: tuneSmsDrop
-              label: "SMS TOASTS"
+              label: "SMS ALERTS"
               options: [{ value: "yes", label: "On" }, { value: "no", label: "Off" }]
               current: (root.info.sms_notify || "") !== ""
                        ? root.info.sms_notify
