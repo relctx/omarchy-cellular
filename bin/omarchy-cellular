@@ -13,7 +13,8 @@ NM_CONN="${OMARCHY_CELLULAR_CONN:-Omarchy Cellular}"
 # name; keep both pointing at the same place.
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cellular"
 STATE_DIR=$STATE
-# Card identifiers and usage accounting live here; nobody else's business.
+# Holds card identifiers and usage accounting, so keep it out of other
+# accounts' reach.
 mkdir -p "$STATE_DIR" 2>/dev/null && chmod 700 "$STATE_DIR" 2>/dev/null
 # Pre-card-split accounting; still read for a card never seen since.
 USAGE_FILE="$STATE_DIR/usage"
@@ -341,12 +342,12 @@ ensure_radio() {
 }
 
 # Prints the (possibly new) modem index. Both repairs need root, so they go
-# through pkexec; neither runs unless the control port has actually gone.
-# Escalation is ordered and consented: first an in-place USB re-probe of the
-# one affected device, then — only if that fails — a ModemManager restart,
-# each behind its own polkit prompt, never scheduled or polled. Without the
-# last rung, a resume that ate the control port ends at telling the user to
-# restart ModemManager by hand.
+# through pkexec, and neither runs unless the control port is actually
+# missing. The USB re-probe is tried first because it affects only this
+# device; the ModemManager restart runs only if the re-probe fails. Each
+# step is a separate polkit prompt, and both happen only inside a
+# user-initiated connect, never from polling. Without the restart step the
+# user would have to run "systemctl restart ModemManager" by hand.
 ensure_control_port() {
   local idx="$1" dev
   has_control_port "$idx" && { printf '%s' "$idx"; return 0; }
@@ -505,7 +506,7 @@ card_wait_resolvable() {
   return 1
 }
 
-# First sight of a card: seed its file from what the modem knows.# First sight of a card: seed its file from what the modem knows. Detect is
+# First sight of a card: seed its file from what the modem knows. Detect is
 # quiet here; its answer lands in the file, not on a feed.
 card_ensure() {
   local f
@@ -543,7 +544,8 @@ get_cfg() {
 
 set_cfg() {
   local key="$1" val="$2" dst="$CONFIG" f
-  # One key, one line: a newline smuggled in a value must not become a second.
+  # Values are stored one per line, so fold any newline in the value to a
+  # space before writing.
   val=${val//$'\n'/ }
   if card_key "$key" && f=$(card_file); then
     dst=$f
@@ -552,7 +554,7 @@ set_cfg() {
     ensure_cfg
   fi
   if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$dst" 2>/dev/null; then
-    # The value lands inside the sed replacement; its metacharacters are data.
+    # Escape sed replacement metacharacters so the value is written literally.
     local sv=${val//\\/\\\\}
     sv=${sv//|/\\|}
     sv=${sv//&/\\&}
@@ -610,8 +612,8 @@ read_state() {
 
   local mstate
   mstate=$(kv "$dump" modem.generic.state)
-  # Global: the panel reports roaming, which is the one state Wi-Fi has no
-  # analogue for and the one that costs money.
+  # Global: the panel reports roaming because Wi-Fi has no equivalent state
+  # and roaming can cost money.
   REG_STATE=$(kv "$dump" modem.3gpp.registration-state)
   local reg=$REG_STATE
 
@@ -879,8 +881,8 @@ add_usage_to() { # <iccid> <d_rx> <d_tx>
       esac
     done <"$f"
   fi
-  # Written whole then renamed: a run killed mid-write must not lose the
-  # accumulated counter.
+  # Write to a temporary file and rename, so a run killed mid-write cannot
+  # truncate the accumulated counter.
   printf '%srx=%s\ntx=%s\n' "$rest" "$((rx + $2))" "$((tx + $3))" >"$f.new" && mv "$f.new" "$f"
 }
 
@@ -911,9 +913,8 @@ meter_update() {
     done <"$uf"
   fi
 
-  # When counting began -- distinct from when the billing period began, and
-  # timestamped: it pairs with the reset control, which is exactly the moment
-  # it records.
+  # When counting began. Distinct from the billing period start; stored as a
+  # timestamp because it records the moment the reset control was used.
   [[ -n $u_since ]] || u_since=$(date '+%F %H:%M')
 
   # Reset when the stored end date has arrived. Changing the renewal day or
@@ -1198,11 +1199,9 @@ cmd_signal() {
     return 0
   }
 
-  # Per-RAT blocks: a heading, then indented "NAME: 'value'" lines. Values the
-  # modem has no reading for come back as n/a and are dropped.
   # Per-RAT blocks: a heading, then indented "NAME: 'value'" lines. A RAT the
   # modem is not on reports every value as n/a, so the heading is held back
-  # until something under it is worth printing.
+  # until something under it has a value.
   local line name val pending=""
   while IFS= read -r line; do
     case $line in
@@ -1435,7 +1434,7 @@ cmd_at() {
 
 # What this SIM is provisioned with and what the modem is using, from
 # ModemManager. The initial EPS bearer is the carrier's own setting, attached
-# at registration; the bearers are what has actually been dialled. A modem that
+# at registration; the bearers are what has actually been dialed. A modem that
 # reports neither is not hiding a list -- MBIM exposes no equivalent of the
 # modem's local context table, so there is nothing further to ask it for.
 cmd_apn_list() {
@@ -1672,8 +1671,9 @@ read_signal() {
 
 # The cell neighborhood, read from the modem's QMI NAS service over the MBIM
 # port it already shares with ModemManager. One authorization covers both
-# queries. Presentation only: serving cell, its band and width, and every
-# neighbor the modem can hear, strongest first. The reader concludes.
+# queries. Output is presentation only — serving cell, its band and width,
+# and every neighbor the modem can hear, strongest first — with no
+# interpretation added.
 cmd_cells() {
   command -v qmicli >/dev/null || {
     echo "Cell diagnostics need qmicli (libqmi), which is not installed." >&2
@@ -1705,8 +1705,8 @@ cmd_cells() {
   cells=$(sed -n '/===CELLS===/,/===CA===/p' <<<"$raw")
 
   # Carrier aggregation: which carriers the modem is actually using. The
-  # primary plus every activated secondary is the real downlink, and the
-  # WIDTH column owes each its number.
+  # real downlink is the primary plus every activated secondary, and the
+  # WIDTH column needs a value for each.
   sed -n '/===CA===/,$p' <<<"$raw" | awk '
     function emit() {
       if (role != "" && (role == "P" || state == "activated")) {
@@ -1819,10 +1819,9 @@ cmd_cells() {
   fi
 }
 
-# Text messages, straight off the bus: list, read, delete, all unprivileged.
-# Carrier texts are most of what a data SIM ever receives -- balance notices,
-# activation confirmations, roaming warnings -- and deleting them is the half
-# the Windows mobile-broadband panel never shipped.
+# Text messages over the bus: list, read, delete, all unprivileged.
+# Carrier texts are most of what a data SIM receives: balance notices,
+# activation confirmations, roaming warnings.
 sms_paths() {
   local idx
   idx=$(modem_index) || return 1
@@ -1896,7 +1895,7 @@ cmd_sms() {
   esac
 }
 
-# One identity per line: every card this modem can be, flattened. Physical
+# One identity per line: every card this modem can use. Physical
 # slots come from ModemManager's slot objects, which answer for inactive
 # cards too; eSIM profiles come from the cache the last profile list wrote,
 # since the eUICC itself only answers while selected.
@@ -1916,8 +1915,8 @@ cmd_sims() {
     [[ -n $sp && $sp != / ]] || continue
     iccid=$(sim_property "$sp" SimIdentifier)
     # While a profile switch rebuilds the SIM objects, an occupied slot
-    # briefly answers blank; the card in it has not changed. Remember what
-    # each slot held so the tile rides through instead of vanishing.
+    # briefly reports no ICCID even though the card has not changed. Fall
+    # back to the slot's last known ICCID so the entry stays listed.
     if [[ -n $iccid ]]; then
       printf '%s' "$iccid" >"$STATE_DIR/slot$i.iccid" 2>/dev/null || true
     else
@@ -1934,9 +1933,9 @@ cmd_sims() {
     idx=$((idx + 1))
   done
 
-  # An eUICC with nothing cached still needs a door: a placeholder entry
-  # whose selection is the slot switch that makes Manage reachable, which is
-  # the whole first-run bootstrap on an empty card.
+  # An empty eUICC with no cached profiles still gets a placeholder entry.
+  # Selecting it switches to the eUICC slot, which is what makes Manage
+  # reachable on a card with nothing installed yet.
   if [[ -n $eslot && ( ! -r $STATE_DIR/profiles.cache || ! -s $STATE_DIR/profiles.cache ) ]]; then
     printf 'sim.%s.iccid=\n' "$idx"
     printf 'sim.%s.name=eSIM\n' "$idx"
@@ -1973,9 +1972,8 @@ cmd_sims() {
   fi
 }
 
-# Become one of them. Which mechanics that takes -- a slot switch, a profile
-# enable, or both under the one authorization -- is this command's business,
-# not the caller's.
+# Switch to the given card. The mechanics (a slot switch, a profile enable,
+# or both under one authorization) are decided here, not by the caller.
 cmd_use() {
   local want="${1:-}"
   [[ $want =~ ^[0-9]{10,22}$ ]] || {
@@ -2018,9 +2016,9 @@ cmd_use() {
   if ! jq -e '.payload.code == 0' <<<"$ESIM_JSON" >/dev/null 2>&1; then
     local why
     why=$(jq -r '.payload.data // .payload.message // empty' <<<"$ESIM_JSON" 2>/dev/null | head -1)
-    # Already the enabled profile: the click meant "switch to the eSIM", the
-    # slot switch inside the session did that, and the redundant enable being
-    # refused is the success case wearing an error.
+    # The profile was already enabled: the click meant "switch to the eSIM",
+    # the slot switch inside the session did that, and the refusal of the
+    # redundant enable is not a real failure.
     if [[ $why != *"not in disabled state"* ]]; then
       echo "Could not enable that profile${why:+ — $why}." >&2
       notify "Profile switch failed${why:+ — $why}"
@@ -2067,7 +2065,7 @@ cmd_settle() {
   card_settle "$want" "$up"
 }
 
-# The event feed lands here on every change, which makes this the reaction# The event feed lands here on every change, which makes this the reaction
+# The event feed lands here on every change, which makes this the reaction
 # point: when the card is not the one whose settings were last pushed, push
 # the right ones. Modify only -- the switch flows reconnect themselves, and a
 # card change without them (mmcli by hand) should not cost a live connection.
@@ -2112,7 +2110,7 @@ cmd_panel() {
   printf 'prefer_cellular=%s\n' "$([[ $(get_cfg PREFER_CELLULAR) == yes ]] && echo yes || echo no)"
   printf 'route_via=%s\n' "$(route_via)"
 
-  # Roaming is the one state Wi-Fi has no analogue for, and it costs money.
+  # Reported because Wi-Fi has no equivalent state and roaming can cost money.
   read_details
   printf 'reason=%s\n' "$(failure_reason)"
   printf 'roaming=%s\n' "$([[ $REG_STATE == roaming ]] && echo yes || echo no)"
@@ -2873,7 +2871,7 @@ cmd_scan() {
 
   region=$(slurp -d 2>/dev/null) || {
     echo "Cancelled." >&2
-    notify "Scan cancelled"
+    notify "Scan canceled"
     return 1
   }
   grim -g "$region" "$shot" 2>/dev/null || {
@@ -3170,11 +3168,11 @@ carrier_auto() {
   bearer_apn=$(kv "$dump" modem.3gpp.eps.initial-bearer.settings.apn)
   [[ $bearer_apn == "--" ]] && bearer_apn=""
   # The initial bearer is not always the data one. An eSIM provisioning only
-  # signalling contexts reports IMS here (vzwims on Verizon).
-  local signalling_only=0
+  # signaling contexts reports IMS here (vzwims on Verizon).
+  local signaling_only=0
   # Exact or suffix only; a loose *ims* substring would drop every AT&T APN.
   case "${bearer_apn,,}" in
-  ims | sos | emergency | *ims) bearer_apn="" signalling_only=1 ;;
+  ims | sos | emergency | *ims) bearer_apn="" signaling_only=1 ;;
   esac
   if [[ -n $bearer_apn ]]; then
     echo "Using the APN the modem was provisioned with${provider:+ for $provider} ($bearer_apn)."
@@ -3182,12 +3180,12 @@ carrier_auto() {
     return 0
   fi
 
-  # No data APN to copy: either the only bearer is a signalling context, or the
+  # No data APN to copy: either the only bearer is a signaling context, or the
   # modem names nothing at all. Both mean the same thing here. The database
   # holds the host network's APN, which is wrong for an MVNO and for an eSIM
   # negotiating its own, so blank is the safer of the two answers: the network
   # picks, and a carrier that truly needs a value can still be set by hand.
-  if ((signalling_only)); then
+  if ((signaling_only)); then
     echo "The modem is provisioned with no data APN${provider:+ for $provider}."
   else
     echo "The modem does not report an APN${provider:+ for $provider}."

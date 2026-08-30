@@ -68,8 +68,8 @@ Panel {
 
   function sessionStart() {
     if (sessionProc.running) return
-    // The queue is the callers': the click that starts the session has
-    // usually just queued the command the session exists to run.
+    // The queue is left alone: the click that starts the session has
+    // usually already queued the command it wants run.
     root.sessionReady = false
     root.sessionVerb = ""
     root.sessionLines = []
@@ -104,8 +104,8 @@ Panel {
     root.sessionArg = cmd.indexOf(" ") > 0 ? cmd.substring(cmd.indexOf(" ") + 1) : ""
     root.sessionLines = []
     root.profilesLoading = true
-    // The eUICC works for several seconds on a mutation; say so where the
-    // status line is, not only inside the Manage box.
+    // A mutation takes the eUICC several seconds; show a busy label in the
+    // status line, not only inside the Manage box.
     if (root.sessionVerb === "enable") root.busyLabel = "Switching profile…"
     else if (root.sessionVerb !== "list" && root.sessionVerb !== "chipinfo")
       root.busyLabel = "Updating the eSIM…"
@@ -167,9 +167,9 @@ Panel {
     // main feed re-reads so the card list and identity follow immediately
     // instead of waiting out the poll interval.
     root.sessionSend("list")
-    // Enabling through the session switched the card but did none of the
-    // bookkeeping a switch needs; `settle` is that tail — config follows
-    // the card, NetworkManager reapplies, the connection comes back.
+    // Enabling through the session switches the card but skips the switch
+    // bookkeeping. `settle` runs it: config follows the card, NetworkManager
+    // reapplies its settings, and the connection is brought back up.
     if (verb === "enable" && arg !== "")
       root.runAction([root.cli, "settle", arg])
     root.opened ? root.refreshDetails() : root.refresh()
@@ -232,9 +232,8 @@ Panel {
            : v >= -95 ? "poor" : "weak"
     return ""
   }
-  // Color carries the judgment the tier tables encode: red where the link
-  // is in trouble, plain otherwise — the same language ping and packet loss
-  // already speak.
+  // Color carries the tier tables' judgment: red where the link is in
+  // trouble, plain otherwise, matching how the ping rows already behave.
   function sigColor(kind, raw) {
     var t = sigTier(kind, raw)
     return (t === "poor" || t === "cell edge" || t === "weak") ? urgent : barForeground
@@ -451,8 +450,8 @@ Panel {
       var r = function (x) { return x.role === "P" ? 0 : x.role === "S" ? 1 : 2 }
       return r(a) - r(b)
     })
-    // The camped cell is not always in the measured list; the table still
-    // owes it a row.
+    // The camped cell is not always in the measured list; add a row for it
+    // when missing.
     if (diagServing.band !== undefined && (out.length === 0 || !out[0].serving)) {
       out.unshift({
         serving: true,
@@ -558,8 +557,8 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(barForeground, 1.4)
 
-  // The switch throws instantly on click; while the toggle is in flight it
-  // shows where we are going, not where we still are.
+  // The switch flips instantly on click; while the toggle is in flight it
+  // shows the target state, not the current one.
   property bool desired: false
   readonly property bool switchChecked: busy ? desired : connected
 
@@ -609,9 +608,9 @@ Panel {
     if (isNaN(d.getTime())) return ""
     return "Resets " + Qt.formatDate(d, "MMM d")
   }
-  // When the meter began counting -- distinct from when the period began.
-  // Shown as the CLI records it: a timestamp, because it pairs with the
-  // reset control and that is the moment it captures.
+  // When the meter began counting, distinct from when the period began.
+  // Shown as the CLI records it: a timestamp of the moment the reset
+  // control was used.
   readonly property string startedLabel:
     info.counting_since ? "Started " + info.counting_since : ""
 
@@ -667,7 +666,7 @@ Panel {
     info = next
     // A poll that races modem re-enumeration reads the modem object before
     // its SIM slots repopulate: zero cards, everything else healthy. Keep
-    // the tiles; an honestly cardless modem reports nosim or absent.
+    // the tiles; a modem with genuinely no cards reports nosim or absent.
     var freshSims = parseIndexed(raw, "sim")
     if (freshSims.length > 0 || sims.length === 0
         || next.state === "nosim" || next.state === "absent" || next.hw !== "yes")
@@ -768,8 +767,8 @@ Panel {
     return "Working…"
   }
 
-  // Returns false when another action holds the slot, so callers that clear
-  // their own input can keep it instead of dropping it on the floor.
+  // Returns false when another action is already running, so callers that
+  // clear their own input can keep it instead of losing it.
   property var actionFollow: []
   function runAction(cmd, follow) {
     if (actionProc.running) return false
@@ -794,8 +793,8 @@ Panel {
     if (root.bar) root.bar.run(cmd)
   }
 
-  // Copy without closing the panel: you are usually reading the value you just
-  // copied. Masked fields copy what they are hiding, not the dots.
+  // Copy without closing the panel, since the copied value is usually still
+  // being read. Masked fields copy the hidden value, not the dots.
   function copyValue(v) {
     if (!v) return
     Quickshell.execDetached(["wl-copy", "--", v])
@@ -806,7 +805,7 @@ Panel {
 
   onOpenedChanged: if (!opened) {
     resetStats()
-    // Nothing elevated outlives the panel.
+    // Close the elevated session when the panel closes.
     root.esimExpanded = false
     root.sessionStop()
   }
@@ -906,9 +905,10 @@ Panel {
       for (var i = 0; i < list.length; i++) {
         var m = list[i]
         var key = (m.number || "") + "|" + (m.time || "") + "|" + (m.text || "").slice(0, 40)
-        // Unseen, received, recent, and wanted: a modem re-enumeration
-        // replays Added for the whole store, and a partial read during the
-        // churn can make old mail look new — age is the backstop.
+        // Notify only for unseen, received, recent messages: a modem
+        // re-enumeration replays Added for the whole store, and a partial
+        // read during the churn can make old messages look new, so the age
+        // check is the backstop.
         var fresh = false
         if (m.time) {
           var t = Date.parse(m.time.replace(" ", "T"))
@@ -1303,12 +1303,13 @@ Panel {
           }
         }
 
-        // RSRP over the last five minutes: a thin line that answers what the
-        // instantaneous number cannot — is it degrading, and did moving help.
+        // RSRP over the last five minutes: a thin line showing whether the
+        // signal is degrading and whether moving helped, which the
+        // instantaneous number cannot.
         Column {
           id: sparkCol
-          // Stays once a metric exists: an empty ground during a sample gap
-          // reads better than the whole section reflowing in and out.
+          // Stays visible once a metric exists: an empty chart during a
+          // sample gap beats the whole section reflowing in and out.
           visible: root.hwPresent && root.setting("sparkline", true)
                    && (root.rsrpHistory.length >= 2 || root.sparkMetric !== "")
           width: parent.width
@@ -1382,7 +1383,8 @@ Panel {
               width: root.mgmtView === "" ? parent.width : Math.round(parent.width * 0.55)
               Behavior on width { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
 
-            // A quiet ground so the chart reads as a chart, in theme tones.
+            // A subtle background and border mark the chart area, in theme
+            // tones.
             Rectangle {
               anchors.fill: parent
               radius: Style.cornerRadius
@@ -1407,9 +1409,9 @@ Panel {
                 ctx.reset()
                 var h = pts
                 if (!h || h.length < 2) return
-                // Autoscaled to the window: the deltas are the point, so
-                // whatever movement exists fills the height. Only a 1 dB
-                // guard against a degenerate flat window.
+                // Autoscaled to the window so whatever movement exists
+                // fills the height; the deltas matter more than the absolute
+                // level. A 1 dB floor guards a flat window.
                 var lo = sparkCol.histLo, hi = sparkCol.histHi
                 if (hi - lo < 1) { var mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5 }
                 var t0 = h[0].t, t1 = h[h.length - 1].t
@@ -1549,7 +1551,8 @@ Panel {
             }
 
             // A link, like Reset counter below: the section's controls are
-            // quiet, and a bordered button here read as the main event.
+            // deliberately quiet, and a bordered button looked too prominent
+            // here.
             Text {
               textFormat: Text.PlainText
               id: planButton
@@ -1598,8 +1601,8 @@ Panel {
               Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
             }
 
-            // The calendar's position in the cycle, so pace reads as geometry:
-            // fill short of the tick is under pace.
+            // The calendar's position in the cycle: fill short of the tick
+            // means usage is under pace.
             Rectangle {
               visible: root.cycleFraction >= 0
               x: Math.min(planTrack.width - width, planTrack.width * root.cycleFraction)
@@ -2004,8 +2007,8 @@ Panel {
             fontFamily: root.fontFamily
           }
 
-          // A list, not a wall: one line per message, click to read it,
-          // scrolls past six or so.
+          // One line per message, click to expand; the list scrolls past
+          // six or so.
           ListView {
             id: smsView
             width: parent.width
@@ -2189,7 +2192,7 @@ Panel {
             }
           }
 
-          // A table with headers where headers go: columns, values beneath.
+          // A column-per-field table with a header row.
           Column {
             id: diagTable
             visible: root.diagRows.length > 0
@@ -2988,8 +2991,8 @@ Column {
               font.pixelSize: Style.font.caption
             }
 
-            // Management stays behind its own door, and the eUICC only
-            // answers while it is the selected card.
+            // Management is its own section, and the eUICC only answers
+            // while it is the selected card.
             Item {
               width: parent.width
               visible: root.esimExpanded
