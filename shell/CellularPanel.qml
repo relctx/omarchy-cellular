@@ -1367,11 +1367,9 @@ Panel {
 
           Item {
             width: parent.width
-            // Focus mode: tall enough for the stat rows, so the chart and the
-            // column share one bottom edge and the separator clears both.
-            height: root.mgmtView === "" ? Style.space(28)
-                    : Math.max(Style.space(28), sparkStats.implicitHeight)
-            Behavior on height { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+            // Tall enough for the focus-mode stat rows in both modes, so
+            // entering focus changes only the chart's width, not its height.
+            height: Math.max(Style.space(28), sparkStats.implicitHeight)
 
             // Focus mode narrows the chart to make room for the live numbers
             // the folded stats grid would otherwise show.
