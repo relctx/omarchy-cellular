@@ -655,7 +655,13 @@ Panel {
     absentSince = 0
     updateStats(next)
     info = next
-    sims = parseIndexed(raw, "sim")
+    // A poll that races modem re-enumeration reads the modem object before
+    // its SIM slots repopulate: zero cards, everything else healthy. Keep
+    // the tiles; an honestly cardless modem reports nosim or absent.
+    var freshSims = parseIndexed(raw, "sim")
+    if (freshSims.length > 0 || sims.length === 0
+        || next.state === "nosim" || next.state === "absent" || next.hw !== "yes")
+      sims = freshSims
     recordStrength(next.sig_rsrp, next.sig_rssi)
   }
 
