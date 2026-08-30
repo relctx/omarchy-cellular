@@ -675,7 +675,10 @@ Panel {
     if (freshSims.length > 0 || sims.length === 0
         || next.state === "nosim" || next.state === "absent" || next.hw !== "yes")
       sims = freshSims
-    devices = parseIndexed(raw, "dev")
+    var freshDevs = parseIndexed(raw, "dev")
+    if (freshDevs.length > 0 || devices.length === 0
+        || next.state === "absent" || next.hw !== "yes")
+      devices = freshDevs
     recordStrength(next.sig_rsrp, next.sig_rssi)
   }
 

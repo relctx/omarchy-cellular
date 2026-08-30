@@ -2164,18 +2164,26 @@ cmd_devices() {
 # no longer present just clear; enabling an already-enabled modem is a
 # no-op, so a stale file after reboot costs nothing.
 device_reenable() {
-  local f="$STATE_DIR/disabled-modems" imei i d
+  local f="$STATE_DIR/disabled-modems" imei i d done_one remaining=""
   [[ -s $f ]] || { rm -f "$f" 2>/dev/null; return 0; }
   while IFS= read -r imei; do
     [[ -n $imei ]] || continue
+    done_one=0
     for i in $(modem_list); do
       d=$(modem_dump "$i") || continue
       [[ $(kv "$d" modem.generic.equipment-identifier) == "$imei" ]] || continue
-      timeout 45 mmcli -m "$i" --enable >/dev/null 2>&1
+      timeout 45 mmcli -m "$i" --enable >/dev/null 2>&1 && done_one=1
       break
     done
+    # A modem that was absent or refused keeps its entry, so the next pass
+    # still knows to re-enable it.
+    ((done_one)) || remaining+="$imei"$'\n'
   done <"$f"
-  rm -f "$f"
+  if [[ -n $remaining ]]; then
+    printf '%s' "$remaining" >"$f.new" && mv "$f.new" "$f"
+  else
+    rm -f "$f"
+  fi
 }
 
 # Selecting a modem is the decision that it is this machine's cellular:
