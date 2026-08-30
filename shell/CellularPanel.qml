@@ -2856,6 +2856,27 @@ Panel {
           }
 
           TuneGroup {
+            title: "PANEL"
+
+            TuneField {
+              id: tuneIntervalField
+              label: "IDLE POLL (SEC)"
+              hint: "60"
+              tuneKey: "interval"
+            }
+
+            TuneDrop {
+              id: tuneStatsDrop
+              label: "STATS"
+              options: [{ value: "full", label: "Full" },
+                        { value: "minimal", label: "Minimal" },
+                        { value: "hidden", label: "Hidden" }]
+              current: root.statsMode
+              tuneKey: "stats"
+            }
+          }
+
+          TuneGroup {
             title: "SPARKLINE GRAPH"
 
             TuneDrop {
@@ -2904,27 +2925,6 @@ Panel {
               label: "OPERATOR ID"
               hint: "automatic"
               tuneKey: "operator-id"
-            }
-          }
-
-          TuneGroup {
-            title: "PANEL"
-
-            TuneField {
-              id: tuneIntervalField
-              label: "POLL SECONDS"
-              hint: "60"
-              tuneKey: "interval"
-            }
-
-            TuneDrop {
-              id: tuneStatsDrop
-              label: "STATS"
-              options: [{ value: "full", label: "Full" },
-                        { value: "minimal", label: "Minimal" },
-                        { value: "hidden", label: "Hidden" }]
-              current: root.statsMode
-              tuneKey: "stats"
             }
           }
 

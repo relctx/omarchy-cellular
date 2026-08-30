@@ -2172,7 +2172,8 @@ usage: omarchy-cellular tune <key> [value]
   operator-id    force MCC+MNC registration (blank for automatic)
   spark-metric   auto | snr | signal | off   (auto: RSRP/RSSI by RAT; off hides the graph)
   spark-minutes  sparkline window, minutes (1-180; blank for 5)
-  interval       background poll seconds (10-3600; blank for the widget setting)
+  interval       idle fallback poll, seconds (10-3600; blank for the widget
+                 setting) — the event feed does the live updating
   stats          full | minimal | hidden — the connection stats block
 EOF
     return 2
