@@ -2533,9 +2533,9 @@ cmd_toggle() {
 
 # eSIM provisioning needs a Local Profile Assistant. The plugin system has no
 # way to declare a dependency, so check at the point of use.
-LPA_HINT="Install one with:  yay -S lpac
-It is an AUR package, so it builds from source on your machine. Any build
-of lpac 2.3 or newer carries the mbim and qmi drivers this plugin uses."
+LPA_HINT="Install one with:  yay -S lpac-git
+The stock lpac package lacks the MBIM driver this plugin depends on.
+It is an AUR package, so it builds from source on your machine."
 
 have_lpa() { command -v lpac >/dev/null; }
 
@@ -2643,8 +2643,8 @@ esim_slot() {
   return 1
 }
 
-# Whether this lpac was built with a given APDU driver; lpac 2.3 builds
-# them all by default, but custom builds can exclude some. LPAC_APDU is set
+# Whether this lpac was built with a given APDU driver. Arch's lpac package
+# ships at, pcsc and stdio only; lpac-git adds mbim and qmi. LPAC_APDU is set
 # for the query because a bare 'driver list' initializes the default backend
 # and fails on any machine without pcscd running.
 lpac_has_driver() {

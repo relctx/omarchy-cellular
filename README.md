@@ -35,10 +35,10 @@ Omarchy 4.0 (quattro) or newer. The widget targets the Quickshell-based omarchy-
 
 eSIM profile management needs lpac built with the driver matching the modem's
 control port: `mbim` normally, `qmi` for modems that expose only a QMI port.
-The AUR `lpac` package (2.3 or newer) carries both:
+The `lpac-git` package has both, the stock `lpac` package has neither:
 
 ```sh
-yay -S lpac
+yay -S lpac-git
 omarchy pkg add zbar        # QR scan; codes can still be typed without it
 ```
 
