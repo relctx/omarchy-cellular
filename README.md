@@ -22,8 +22,8 @@ For anyone coming from the 1.0.x marketplace build:
   MBIM or QMI control port instead of AT commands. The connection stays up;
   nothing is stopped. One authorization covers a whole management session.
   This adds the `lpac-git` requirement; existing users should remove `lpac`
-  and install `lpac-git` (`lpac` pulls in `libeuicc` and friends, which
-  `lpac-git` provides itself):
+  and its split packages, then install `lpac-git`, which provides `libeuicc`
+  itself:
 
   ```sh
   yay -Rns lpac            # takes libeuicc with it
