@@ -605,6 +605,7 @@ read_state() {
   # modem then hunts forever, which looks like poor coverage.
   local pslot spath
   pslot=$(kv "$dump" modem.generic.primary-sim-slot)
+  [[ $pslot =~ ^[0-9]+$ ]] && ACTIVE_SLOT=$pslot
   if [[ $pslot =~ ^[0-9]+$ && $mstate != connected ]]; then
     spath=$(kv "$dump" "modem.generic.sim-slots.value[$pslot]")
     if [[ $spath == / ]]; then

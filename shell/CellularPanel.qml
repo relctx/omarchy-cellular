@@ -528,8 +528,7 @@ Panel {
   // next action clears it. The CLI already notifies; this is for the panel
   // that was open when it happened.
   function notifyError(msg) {
-    notifyProc.command = ["omarchy-notification-send", "-u", "critical", "Cellular", msg]
-    notifyProc.running = true
+    Quickshell.execDetached(["omarchy-notification-send", "-u", "critical", "Cellular", msg])
   }
   function maskId(v) {
     if (!v) return "—"
@@ -769,8 +768,7 @@ Panel {
   // copied. Masked fields copy what they are hiding, not the dots.
   function copyValue(v) {
     if (!v) return
-    copyProc.command = ["wl-copy", "--", v]
-    copyProc.running = true
+    Quickshell.execDetached(["wl-copy", "--", v])
     root.copied = v
     copiedTimer.restart()
   }
@@ -877,10 +875,9 @@ Panel {
         }
         if (!first && !seen[key] && m.kind === "received" && fresh
             && root.setting("smsNotify", true)) {
-          notifyProc.command = ["omarchy-notification-send", "-g", "󰍡",
+          Quickshell.execDetached(["omarchy-notification-send", "-g", "󰍡",
             "Text from " + (m.number || "unknown"),
-            (m.text || "").slice(0, 120)]
-          notifyProc.running = true
+            (m.text || "").slice(0, 120)])
         }
         seen[key] = true
       }
@@ -888,8 +885,6 @@ Panel {
       root.smsList = list
     }
   }
-
-  Process { id: notifyProc }
 
   Process {
     id: browseProc
@@ -925,8 +920,6 @@ Panel {
   }
 
 
-
-  Process { id: copyProc }
 
   Process {
     id: profileProc
