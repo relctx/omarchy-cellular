@@ -324,7 +324,13 @@ Panel {
   property var smsList: []
   property var smsSeen: null
   property string smsOpen: ""
-  function loadSms() { if (!smsProc.running) smsProc.running = true }
+  // A reload requested mid-read runs again when the read finishes: the
+  // trigger was an event this read may have started too early to see.
+  property bool smsReloadQueued: false
+  function loadSms() {
+    if (smsProc.running) { smsReloadQueued = true; return }
+    smsProc.running = true
+  }
 
   // Carrier browser: the provider database, staged country -> carrier ->
   // APN, all unprivileged reads of the shipped database.
@@ -855,6 +861,10 @@ Panel {
     command: [root.cli, "sms", "feed"]
     stdout: StdioCollector { id: smsOut; waitForEnd: true }
     onExited: function (code) {
+      if (root.smsReloadQueued) {
+        root.smsReloadQueued = false
+        Qt.callLater(root.loadSms)
+      }
       if (code !== 0) return
       var list = root.parseIndexed(smsOut.text, "sms")
       // Notify once per message we have never seen, received ones only.

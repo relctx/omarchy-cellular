@@ -220,6 +220,15 @@ CACHE_DIR="$RUNTIME_DIR/omarchy-cellular.$$"
 # A run killed before its trap leaves this behind, and PIDs are reused.
 rm -rf "$CACHE_DIR"
 trap 'rm -rf "$CACHE_DIR"' EXIT
+# Runs killed too hard for their trap (SIGKILL, panel teardown) accumulate
+# dirs until reboot; sweep any whose owning process is gone.
+for _stale in "$RUNTIME_DIR"/omarchy-cellular.*; do
+  [[ -d $_stale ]] || continue
+  _spid=${_stale##*.}
+  [[ $_spid =~ ^[0-9]+$ && $_spid != "$$" ]] || continue
+  kill -0 "$_spid" 2>/dev/null || rm -rf "$_stale"
+done
+unset _stale _spid
 # A real dump is about 13 KB. The cap is generous enough that no working modem
 # reaches it and small enough that a service answering forever cannot exhaust
 # the runtime dir or this shell's memory. Overflow fails closed: a truncated
