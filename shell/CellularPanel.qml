@@ -373,6 +373,11 @@ Panel {
     return st === "enabled" || st === "1" || st === "true"
   }
 
+  // eSIM management needs an lpac that can reach the eUICC; the feed
+  // reports which transport its probe found, "none" when it cannot.
+  readonly property bool lpaReady: (info.esim_transport || "") !== "none"
+                                   && (info.esim_transport || "") !== ""
+
   // The card list, parsed from the same feed as everything else.
   property var sims: []
 
@@ -3141,7 +3146,7 @@ Panel {
               anchors.verticalCenterOffset: Math.round(simHeader.topPadding / 2)
               text: root.esimExpanded ? "Close eSIM management" : "Manage eSIM…"
               color: root.barForeground
-              opacity: !root.esimSelected ? 0.35
+              opacity: !root.esimSelected || !root.lpaReady ? 0.35
                        : manageArea.containsMouse || root.esimExpanded ? 1 : 0.6
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -3153,9 +3158,9 @@ Panel {
                 // Hover stays live while the control is unavailable, so the
                 // tooltip can say why; only the click is gated.
                 hoverEnabled: true
-                cursorShape: root.esimSelected ? Qt.PointingHandCursor : Qt.ArrowCursor
+                cursorShape: root.esimSelected && root.lpaReady ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: {
-                  if (!root.esimSelected) return
+                  if (!root.esimSelected || !root.lpaReady) return
                   root.esimExpanded = !root.esimExpanded
                   if (root.esimExpanded) root.loadProfiles()
                   else root.sessionStop()
@@ -3164,9 +3169,11 @@ Panel {
 
               PanelToolTip {
                 visible: manageArea.containsMouse
-                text: root.esimSelected
-                      ? "Rename, add, or remove eSIM profiles"
-                      : "Select the eSIM first to manage its profiles"
+                text: !root.lpaReady
+                      ? "Needs lpac with the mbim driver: yay -S lpac-git"
+                      : root.esimSelected
+                        ? "Rename, add, or remove eSIM profiles"
+                        : "Select the eSIM first to manage its profiles"
                 fontFamily: root.fontFamily
               }
             }

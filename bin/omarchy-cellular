@@ -2191,7 +2191,10 @@ migrate() {
   # missing stamp with existing state is an upgrade from before the stamp
   # existed, not a first install.
   if [[ -n $last || -s $STATE_DIR/usage || -s $STATE_DIR/iccid || -d $CARD_DIR ]]; then
-    notify "Cellular plugin updated to $cur"
+    local note="Updated to $cur. Release notes: github.com/relctx/omarchy-cellular/releases"
+    [[ $(esim_transport) == none ]] &&
+      note+=$'\n'"eSIM management now needs lpac with the mbim driver: yay -S lpac-git"
+    notify "$note"
   fi
   printf '%s\n' "$cur" >"$f"
 }
@@ -2947,7 +2950,8 @@ cmd_esim_session() {
   drv=${t%% *}
   dev=${t#* }
   lpac_has_driver "$drv" || {
-    echo "This lpac has no $drv driver." >&2
+    echo "This lpac has no $drv driver, so it cannot reach the eUICC." >&2
+    echo "$LPA_HINT" >&2
     return 1
   }
   slot=$(esim_slot) || {
@@ -3690,7 +3694,7 @@ cmd_doctor() {
   # list that costs nothing and one that drops the connection for half a minute.
   case "$(esim_transport)" in
   mbim) note "eSIM transport — connection stays up" "mbim" ;;
-  *) note "eSIM transport — needs lpac with the mbim driver" "--" ;;
+  *) note "eSIM transport — needs lpac with the mbim driver (yay -S lpac-git)" "--" ;;
   esac
   note "zbarimg — QR scan" "$(have zbarimg)"
   note "grim/slurp — QR scan" \
