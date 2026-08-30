@@ -373,11 +373,6 @@ Panel {
     return st === "enabled" || st === "1" || st === "true"
   }
 
-  // eSIM management needs an lpac that can reach the eUICC; the feed
-  // reports which transport its probe found, "none" when it cannot.
-  readonly property bool lpaReady: (info.esim_transport || "") !== "none"
-                                   && (info.esim_transport || "") !== ""
-
   // The card list, parsed from the same feed as everything else.
   property var sims: []
 
@@ -3169,11 +3164,9 @@ Panel {
 
               PanelToolTip {
                 visible: manageArea.containsMouse
-                text: !root.lpaReady
-                      ? "Needs lpac with the mbim driver: yay -S lpac-git"
-                      : root.esimSelected
-                        ? "Rename, add, or remove eSIM profiles"
-                        : "Select the eSIM first to manage its profiles"
+                text: root.esimSelected
+                      ? "Rename, add, or remove eSIM profiles"
+                      : "Select the eSIM first to manage its profiles"
                 fontFamily: root.fontFamily
               }
             }
