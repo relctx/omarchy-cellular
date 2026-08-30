@@ -261,6 +261,7 @@ Panel {
     // behavior: the modem alternates which strength field it reports, so
     // only a sustained absence (45s) switches to what is still reporting.
     var forced = String(info.spark_metric || "auto").toLowerCase()
+    if (forced === "off") return
     var metric, raw
     if (forced !== "auto" && vals[forced.toUpperCase()] !== undefined) {
       metric = forced.toUpperCase()
@@ -1392,6 +1393,7 @@ Panel {
           // Stays visible once a metric exists: an empty chart during a
           // sample gap beats the whole section reflowing in and out.
           visible: root.hwPresent && root.setting("sparkline", true)
+                   && root.info.spark_metric !== "off"
                    && (root.rsrpHistory.length >= 2 || root.sparkMetric !== "")
           width: parent.width
           spacing: Style.space(2)
@@ -2802,7 +2804,8 @@ Panel {
               // the sticky auto logic is that pair.
               options: [{ value: "auto", label: "RSSI/RSRP" },
                         { value: "snr", label: "SNR" },
-                        { value: "signal", label: "Signal quality" }]
+                        { value: "signal", label: "Signal quality" },
+                        { value: "off", label: "Off" }]
               current: root.info.spark_metric || "auto"
               tuneKey: "spark-metric"
             }
