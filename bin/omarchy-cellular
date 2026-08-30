@@ -2186,8 +2186,12 @@ migrate() {
   sed -i '1s|^# Omarchy WWAN.*|# Omarchy Cellular configuration|' "$CONFIG" 2>/dev/null
   sed -i '2s|^# Read by omarchy-wwan.*|# Read by omarchy-cellular, which applies it to the NetworkManager profile.|' "$CONFIG" 2>/dev/null
 
-  # Quiet on first install; one notification on a real version change.
-  [[ -n $last ]] && notify "Cellular plugin updated to $cur"
+  # Quiet on first install; one notification on a real version change. A
+  # missing stamp with existing state is an upgrade from before the stamp
+  # existed, not a first install.
+  if [[ -n $last || -s $STATE_DIR/usage || -s $STATE_DIR/iccid || -d $CARD_DIR ]]; then
+    notify "Cellular plugin updated to $cur"
+  fi
   printf '%s\n' "$cur" >"$f"
 }
 
