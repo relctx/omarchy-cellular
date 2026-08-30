@@ -2145,6 +2145,8 @@ cmd_devices() {
 # match a present modem's primary port or IMEI before it is stored.
 cmd_device() {
   local want="${1:-}" i d
+  # The panel shows the /dev/ path; accept it here so it pastes back.
+  want=${want#/dev/}
   if [[ -z $want ]]; then
     get_cfg DEVICE
     return 0

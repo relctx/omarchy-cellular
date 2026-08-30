@@ -2754,7 +2754,7 @@ Panel {
             InfoPair { label: "Carrier"; value: root.info.carrier_config || "—" }
             InfoPair { label: "Modem"; value: root.info.model || "—" }
             InfoPair { label: "Firmware"; value: root.info.firmware || "—" }
-            InfoPair { label: "Port"; value: root.info.port || "—" }
+            InfoPair { label: "Device path"; value: root.info.port ? "/dev/" + root.info.port : "—"; copyValue: root.info.port ? "/dev/" + root.info.port : "" }
 
             // Modem picker, only on machines with more than one.
             Column {
@@ -2796,7 +2796,7 @@ Panel {
                     anchors.right: parent.right
                     anchors.rightMargin: Style.space(3)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: devRow.modelData.port || ""
+                    text: devRow.modelData.port ? "/dev/" + devRow.modelData.port : ""
                     color: root.barForeground
                     opacity: 0.45
                     font.family: root.fontFamily
