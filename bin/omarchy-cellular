@@ -3110,7 +3110,10 @@ cmd_sim() {
         notify "SIM switched — reconnect pending"
       fi
     fi
-    cmd_status
+    # Informational only. Right after a switch the modem is often still
+    # re-enumerating, where cmd_status reads absent and returns 1; that must
+    # not turn a completed switch into a reported failure.
+    cmd_status || true
   else
     echo "Saved SIM_SLOT=$slot. Run 'omarchy-cellular apply' to switch."
   fi
