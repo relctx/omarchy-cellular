@@ -1355,22 +1355,17 @@ Panel {
           rowSpacing: Style.spacing.labelGap
           readonly property real cellW: (width - columnSpacing) / 2
 
-          InfoPair { width: parent.cellW; label: "Operator"; value: root.info.operator || "—" }
-          InfoPair { width: parent.cellW; label: "Technology"; value: root.info.tech || "—" }
+          InfoPair { width: parent.cellW; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
+          InfoPair { width: parent.cellW; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
+          InfoPair { width: parent.cellW; label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
           InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
+          InfoPair { width: parent.cellW; label: "Tech"; value: root.info.tech || "—" }
           InfoPair {
             width: parent.cellW
             label: "Roaming"
             value: root.roaming ? "Yes" : "No"
             valueColor: root.roaming ? root.urgent : root.barForeground
           }
-          InfoPair {
-            width: parent.cellW
-            label: "Ping"
-            value: root.formatPing(root.pingLatency)
-            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
-          }
-          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
         }
 
         Row {
@@ -1604,7 +1599,6 @@ Panel {
               }
               InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "Tech"; value: root.info.tech || "—" }
               InfoPair {
-                visible: root.sparkOff
                 width: sparkStats.cellW
                 size: Style.font.caption
                 label: "Roaming"
