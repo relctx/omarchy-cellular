@@ -106,6 +106,21 @@ management session.
 
 <br clear="both">
 
+<table>
+<tr valign="top">
+<td width="50%"><img src="preview-esim.png" alt="eSIM profile management"><br>
+<sub>eSIM profiles by ICCID: enable, rename, delete, install by code or QR — with the eUICC's free space read from the chip.</sub></td>
+<td width="50%"><img src="preview-diagnostics.png" alt="Cell diagnostics"><br>
+<sub>Carriers in use with widths and aggregation totaled, then every cell the radio hears.</sub></td>
+</tr>
+<tr valign="top">
+<td><img src="preview-messages.png" alt="Messages"><br>
+<sub>Carrier texts, read and deleted in place.</sub></td>
+<td><img src="preview-settings.png" alt="Settings"><br>
+<sub>Settings, grouped and staged behind Save: display layout, chart, polling, network, modem.</sub></td>
+</tr>
+</table>
+
 ## Commands
 
 ```
