@@ -769,6 +769,7 @@ cmd_status() {
 # Waybar-style JSON status: {text, tooltip, class, percentage}. Consumed by the
 # shell bar widget.
 cmd_json() {
+  migrate
   read_state
   # The bar polls this every few seconds, which makes it the data meter's
   # heartbeat: usage accrues and the limit is enforced on every poll.
@@ -2162,6 +2163,34 @@ emit_devices() {
   done
 }
 
+# One migration pass per plugin version. Plugin updates run no hooks, so
+# the code migrates its own config and state on first use after an update.
+# The stamp in state names the last version that ran.
+migrate() {
+  local f="$STATE_DIR/version" cur last
+  cur=$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN_DIR/manifest.json" 2>/dev/null | head -1)
+  [[ -n $cur ]] || return 0
+  last=$(cat "$f" 2>/dev/null)
+  [[ $cur == "$last" ]] && return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null
+
+  # 2.0: the retired spark-metric=off value means the stats-only layout.
+  if [[ $(get_cfg SPARK_METRIC) == off ]]; then
+    set_cfg SPARK_METRIC ""
+    set_cfg STATS stats
+  fi
+  # 2.0: the driver-probe cache was renamed lpac-driver.
+  rm -f "$STATE_DIR/lpac-mbim"
+  # A conf carried over from the omarchy-wwan era keeps its old header;
+  # correct the name without touching any settings.
+  sed -i '1s|^# Omarchy WWAN.*|# Omarchy Cellular configuration|' "$CONFIG" 2>/dev/null
+  sed -i '2s|^# Read by omarchy-wwan.*|# Read by omarchy-cellular, which applies it to the NetworkManager profile.|' "$CONFIG" 2>/dev/null
+
+  # Quiet on first install; one notification on a real version change.
+  [[ -n $last ]] && notify "Cellular plugin updated to $cur"
+  printf '%s\n' "$cur" >"$f"
+}
+
 # Panel-editable knobs from cellular.conf, whitelisted and validated.
 # Bare key prints the stored value; setting an NM-backed key reapplies.
 cmd_settings() {
@@ -2321,6 +2350,7 @@ cmd_device() {
 }
 
 cmd_panel() {
+  migrate
   read_state
   card_track
   meter_update
@@ -2344,10 +2374,6 @@ cmd_panel() {
   printf 'ip_type=%s\n' "$(get_cfg IP_TYPE | grep . || echo ipv4v6)"
   printf 'route_metric=%s\n' "$(get_cfg ROUTE_METRIC)"
   printf 'operator_id=%s\n' "$(get_cfg OPERATOR_ID)"
-  if [[ $(get_cfg SPARK_METRIC) == off ]]; then
-    set_cfg SPARK_METRIC ""
-    set_cfg STATS stats
-  fi
   printf 'spark_metric=%s\n' "$(get_cfg SPARK_METRIC | grep . || echo auto)"
   printf 'spark_minutes=%s\n' "$(get_cfg SPARK_MINUTES)"
   printf 'poll_interval=%s\n' "$(get_cfg POLL_INTERVAL)"
