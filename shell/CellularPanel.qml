@@ -2756,7 +2756,8 @@ Panel {
             InfoPair { label: "Firmware"; value: root.info.firmware || "—" }
             InfoPair { label: "Device path"; value: root.info.port ? "/dev/" + root.info.port : "—"; copyValue: root.info.port ? "/dev/" + root.info.port : "" }
 
-            // Modem picker, only on machines with more than one.
+            // Modem picker, only on machines with more than one. Selection
+            // is exclusive; the caption below carries that meaning.
             Column {
               width: parent.width
               visible: root.devices.length > 1
@@ -2812,6 +2813,16 @@ Panel {
                       root.runAction([root.cli, "device", devRow.modelData.port])
                   }
                 }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "Selecting a modem disables the others."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
               }
             }
           }

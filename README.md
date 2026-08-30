@@ -136,7 +136,10 @@ time a card is seen and applied automatically when the active card changes.
 `cellular.conf` keeps machine-wide settings. On a machine with more than
 one modem, `DEVICE=` selects which one the plugin drives, by primary port
 name (`wwan1mbim0`) or IMEI; unset means the first modem ModemManager
-lists.
+lists. Selecting a modem (`device <port>`, or the panel's picker) disables
+the others through ModemManager and moves the NetworkManager profile to
+the selected modem's interface; `device auto` re-enables exactly what the
+plugin disabled.
 
 ## Data limit
 

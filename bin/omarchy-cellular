@@ -47,8 +47,19 @@ fi
 
 nm_running() { systemctl is-active --quiet NetworkManager 2>/dev/null; }
 
-# The gsm device NM exposes for the modem, e.g. wwan0mbim0.
+# The gsm device NM exposes for the captured modem, e.g. wwan0mbim0.
+# Falls back to NM's first gsm device while the modem object is absent.
 nm_device() {
+  local idx port
+  idx=$(modem_index)
+  if [[ -n $idx ]]; then
+    port=$(kv "$(modem_dump "$idx")" modem.generic.primary-port)
+    if [[ -n $port ]] && nmcli -t -g DEVICE,TYPE device status 2>/dev/null |
+      grep -qxF "$port:gsm"; then
+      printf '%s' "$port"
+      return 0
+    fi
+  fi
   nmcli -t -g DEVICE,TYPE device status 2>/dev/null |
     awk -F: '$2 == "gsm" { print $1; exit }'
 }
@@ -124,6 +135,13 @@ nm_apply() {
   [[ $(get_cfg METERED) == no ]] &&
     args+=(connection.metered no) ||
     args+=(connection.metered yes)
+
+  # The profile stays bound to the captured modem's interface, so a device
+  # selection moves the connection with it. Skipped while the modem is
+  # absent, keeping the last binding.
+  local bind
+  bind=$(nm_device)
+  [[ -n $bind ]] && args+=(connection.interface-name "$bind")
 
   nmcli connection modify "$NM_CONN" "${args[@]}" >/dev/null || return 1
   nm_apply_secrets
@@ -2141,8 +2159,49 @@ cmd_devices() {
   done
 }
 
-# Bare: print the configured selection. `auto` clears it. Anything else must
-# match a present modem's primary port or IMEI before it is stored.
+# Re-enable every modem this plugin disabled, and only those. Keyed on
+# IMEI: object indexes change across re-enumerations. Entries for modems
+# no longer present just clear; enabling an already-enabled modem is a
+# no-op, so a stale file after reboot costs nothing.
+device_reenable() {
+  local f="$STATE_DIR/disabled-modems" imei i d
+  [[ -s $f ]] || { rm -f "$f" 2>/dev/null; return 0; }
+  while IFS= read -r imei; do
+    [[ -n $imei ]] || continue
+    for i in $(modem_list); do
+      d=$(modem_dump "$i") || continue
+      [[ $(kv "$d" modem.generic.equipment-identifier) == "$imei" ]] || continue
+      timeout 45 mmcli -m "$i" --enable >/dev/null 2>&1
+      break
+    done
+  done <"$f"
+  rm -f "$f"
+}
+
+# Selecting a modem is the decision that it is this machine's cellular:
+# every other modem present is disabled (radio off through ModemManager's
+# whitelisted Enable, no prompt), and recorded so a later selection or
+# `device auto` re-enables exactly what was turned off here.
+device_exclusive() {
+  local keep="$1" i d imei port f="$STATE_DIR/disabled-modems"
+  device_reenable
+  for i in $(modem_list); do
+    [[ $i == "$keep" ]] && continue
+    d=$(modem_dump "$i") || continue
+    imei=$(kv "$d" modem.generic.equipment-identifier)
+    port=$(kv "$d" modem.generic.primary-port)
+    if timeout 45 mmcli -m "$i" --disable >/dev/null 2>&1; then
+      printf '%s\n' "$imei" >>"$f"
+      echo "Disabled ${port:-modem $i}."
+    fi
+  done
+  # The chosen modem may itself have been disabled by an earlier selection.
+  timeout 45 mmcli -m "$keep" --enable >/dev/null 2>&1 || true
+}
+
+# Bare: print the configured selection. `auto` clears it and re-enables
+# every modem this plugin disabled. Anything else must match a present
+# modem's primary port or IMEI before it is stored; the rest are disabled.
 cmd_device() {
   local want="${1:-}" i d
   # The panel shows the /dev/ path; accept it here so it pastes back.
@@ -2154,6 +2213,7 @@ cmd_device() {
   if [[ $want == auto ]]; then
     set_cfg DEVICE ""
     cache_flush
+    device_reenable
     echo "Selection cleared; the first modem ModemManager lists is used."
     return 0
   fi
@@ -2164,6 +2224,8 @@ cmd_device() {
       set_cfg DEVICE "$want"
       cache_flush
       echo "Driving $want."
+      device_exclusive "$i"
+      nm_apply >/dev/null 2>&1 || true
       return 0
     fi
   done
@@ -3622,7 +3684,7 @@ usage: omarchy-cellular <command>
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
   devices             every modem present; * marks the one driven
-  device [<port>|<imei>|auto]  pick which modem to drive; bare: show config
+  device [<port>|<imei>|auto]  drive one modem, disable the rest; auto undoes
   sims                every card this modem can be, one per line
   use <iccid>         become one of them: slot switch, profile enable, or both
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
