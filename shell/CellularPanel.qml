@@ -386,12 +386,8 @@ Panel {
       browseLoad()
     } else {
       apnBrowse = false
-      runAction(["sh", "-c",
-        JSON.stringify(cli) + " carrier set "
-        + JSON.stringify(browseCc) + " "
-        + JSON.stringify(browseProv) + " "
-        + JSON.stringify(m.c0)
-        + " && " + JSON.stringify(cli) + " apply"])
+      runAction([cli, "carrier", "set", browseCc, browseProv, m.c0],
+                [cli, "apply"])
     }
   }
 
@@ -764,6 +760,8 @@ Panel {
     if (verb === "use") return "Switching SIM…"
     if (verb === "mode") return "Setting radio mode…"
     if (verb === "settle") return "Reconnecting…"
+    if (verb === "apply") return "Applying…"
+    if (verb === "carrier") return cmd[2] === "auto" ? "Detecting carrier…" : "Setting carrier…"
     if (verb === "autoconnect") return "Saving…"
     if (verb === "profile") return "Updating the eSIM…"
     if (verb === "-c") return "Detecting carrier…"
@@ -772,8 +770,10 @@ Panel {
 
   // Returns false when another action holds the slot, so callers that clear
   // their own input can keep it instead of dropping it on the floor.
-  function runAction(cmd) {
+  property var actionFollow: []
+  function runAction(cmd, follow) {
     if (actionProc.running) return false
+    root.actionFollow = follow || []
     root.busyLabel = root.labelFor(cmd)
     root.busyVerb = cmd[1] === "sh" ? "" : (cmd[1] || "")
     actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
@@ -859,6 +859,11 @@ Panel {
       // A finished sms action owns the authoritative re-read; reading during
       // the delete catches the object mid-teardown.
       if (doneVerb === "sms") root.loadSms()
+      // A queued follow-up runs as its own argv — never through a shell —
+      // and the refresh waits for the end of the chain.
+      var follow = root.actionFollow
+      root.actionFollow = []
+      if (code === 0 && follow.length > 0) { root.runAction(follow); return }
       root.opened ? root.refreshDetails() : root.refresh()
     }
   }
@@ -2440,7 +2445,7 @@ Panel {
               fontFamily: root.fontFamily
               // Needs no input and the panel shows the result, so it runs in
               // place.
-              onClicked: root.runAction(["sh", "-c", JSON.stringify(root.cli) + " carrier auto && " + JSON.stringify(root.cli) + " apply"])
+              onClicked: root.runAction([root.cli, "carrier", "auto"], [root.cli, "apply"])
             }
 
             Button {
@@ -2612,7 +2617,7 @@ Panel {
               enabled: !root.busy
               opacity: root.busy ? 0.5 : 1
               onAccepted: {
-                if (!root.runAction(["sh", "-c", JSON.stringify(root.cli) + " apn " + JSON.stringify(text) + " && " + JSON.stringify(root.cli) + " apply"]))
+                if (!root.runAction([root.cli, "apn", text], [root.cli, "apply"]))
                   return
                 root.apnEditing = false
               }
