@@ -355,7 +355,7 @@ Panel {
   // The card list, parsed from the same feed as everything else.
   property var sims: []
 
-  // Every modem present. The Device box shows a picker only when there is
+  // Every modem present. Settings shows a selector only when there is
   // more than one.
   property var devices: []
 
@@ -1958,13 +1958,18 @@ Panel {
         // ---------- Management chips ----------
         PanelSeparator { foreground: root.barForeground }
 
-        Row {
+        Item {
           id: mgmtChips
-          spacing: Style.space(6)
-          // Square chips, sized to their glyph; the row does not fill the
-          // panel. Button.implicitWidth includes padding, so the size is
-          // explicit.
+          width: parent.width
+          // Square chips, sized to their glyph. Button.implicitWidth
+          // includes padding, so the size is explicit. Settings sits apart
+          // on the right.
           readonly property real cell: Math.round(Style.font.body * 2.2)
+          implicitHeight: cell
+
+          Row {
+          anchors.left: parent.left
+          spacing: Style.space(6)
 
           Button {
             width: mgmtChips.cell
@@ -2038,14 +2043,16 @@ Panel {
               if (root.mgmtView === "sms") root.loadSms()
             }
           }
+          }
 
           Button {
+            anchors.right: parent.right
             width: mgmtChips.cell
             height: mgmtChips.cell
             fontSize: Style.font.caption
             iconSize: Style.font.body
             iconText: "󰒓"
-            tooltipText: "Tunables"
+            tooltipText: "Settings"
             bordered: true
             active: root.mgmtView === "tune"
             foreground: root.barForeground
@@ -2692,7 +2699,7 @@ Panel {
           }
         }
 
-        // ---------- Tunables (behind its chip) ----------
+        // ---------- Settings (behind its chip) ----------
         PanelSeparator {
           visible: root.hwPresent && root.mgmtView === "tune"
           foreground: root.barForeground
@@ -2704,7 +2711,7 @@ Panel {
           spacing: Style.space(8)
 
           PanelSectionHeader {
-            text: "TUNABLES"
+            text: "SETTINGS"
             foreground: root.barForeground
             fontFamily: root.fontFamily
           }

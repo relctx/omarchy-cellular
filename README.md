@@ -82,7 +82,7 @@ happen, and a SIM switch narrates its stages instead of holding one spinner.
   counting start stamped, and cutoff as a switch.
 - **Radio mode**: auto, 5G, 4G, 3G.
 - **Management chips**: Device details, SIM cards, APN and carrier, cell diagnostics,
-  messages, tunables — one box open at a time. Tunables holds the sparkline metric and
+  messages, settings — one box open at a time. Settings holds the sparkline metric and
   window, poll interval, IP type, route metric, operator ID, and — with more than one
   modem — the modem selector.
 - **SIM cards**: every identity the modem can be — the physical card and each eSIM
