@@ -1908,6 +1908,14 @@ cmd_sims() {
     sp=$(kv "$dump" "modem.generic.sim-slots.value[$i]")
     [[ -n $sp && $sp != / ]] || continue
     iccid=$(sim_property "$sp" SimIdentifier)
+    # While a profile switch rebuilds the SIM objects, an occupied slot
+    # briefly answers blank; the card in it has not changed. Remember what
+    # each slot held so the tile rides through instead of vanishing.
+    if [[ -n $iccid ]]; then
+      printf '%s' "$iccid" >"$STATE_DIR/slot$i.iccid" 2>/dev/null || true
+    else
+      iccid=$(cat "$STATE_DIR/slot$i.iccid" 2>/dev/null)
+    fi
     [[ -n $iccid ]] || continue
     name=$(sim_property "$sp" OperatorName)
     [[ -n $name ]] || name=$(sed -n 's/^CARRIER=//p' "$CARD_DIR/$iccid.conf" 2>/dev/null)
