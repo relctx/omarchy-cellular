@@ -12,6 +12,7 @@ Panel {
   ipcTarget: "relctx.cellular"
 
   property var info: ({})
+  property double absentSince: 0
   readonly property string wwanState: info.state || "absent"
   readonly property bool hwPresent: info.hw === "yes"
   readonly property bool installed: info.installed === "yes"
@@ -634,6 +635,16 @@ Panel {
     // Keep the last known state across a transient empty read, so the widget
     // never blinks out while the CLI is briefly unavailable.
     if (Object.keys(next).length === 0) return
+    // Same policy for a modem that momentarily left the bus (ModemManager
+    // re-enumerates it during profile and slot operations): every field
+    // reads empty, not changed. Hold the last real state briefly; a modem
+    // that stays gone gets reported honestly.
+    if (next.state === "absent" && next.hw === "yes"
+        && info.state && info.state !== "absent" && info.state !== "disabled") {
+      if (absentSince === 0) absentSince = Date.now()
+      if (Date.now() - absentSince < 75000) return
+    }
+    absentSince = 0
     updateStats(next)
     info = next
     sims = parseIndexed(raw, "sim")
@@ -1262,8 +1273,10 @@ Panel {
         // instantaneous number cannot — is it degrading, and did moving help.
         Column {
           id: sparkCol
-          visible: root.hwPresent && root.rsrpHistory.length >= 2
-                   && root.setting("sparkline", true)
+          // Stays once a metric exists: an empty ground during a sample gap
+          // reads better than the whole section reflowing in and out.
+          visible: root.hwPresent && root.setting("sparkline", true)
+                   && (root.rsrpHistory.length >= 2 || root.sparkMetric !== "")
           width: parent.width
           spacing: Style.space(2)
 
