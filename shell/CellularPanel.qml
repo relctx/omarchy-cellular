@@ -266,6 +266,12 @@ Panel {
     var metric, raw
     if (forced !== "auto" && vals[forced.toUpperCase()] !== undefined) {
       metric = forced.toUpperCase()
+      // Adopt the pin at once, even before it has data: the chart retitles
+      // and empties instead of wearing the old metric's line.
+      if (sparkMetric !== metric) {
+        sparkMetric = metric
+        rsrpHistory = []
+      }
       raw = vals[metric]
       if (!raw) return
     } else {
