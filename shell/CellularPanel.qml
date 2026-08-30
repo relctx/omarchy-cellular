@@ -1562,6 +1562,14 @@ Panel {
                 valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground
               }
               InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "Tech"; value: root.info.tech || "—" }
+              InfoPair {
+                visible: root.sparkOff
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Roaming"
+                value: root.roaming ? "Yes" : "No"
+                valueColor: root.roaming ? root.urgent : root.barForeground
+              }
             }
           }
         }
