@@ -351,7 +351,18 @@ ensure_radio() {
     sleep 5
   done
 
-  echo "Modem enumerated but the radio is dead (${window}s idle, no signal); resetting…" >&2
+  # Idle with no signal also describes a SIM still initializing or a card
+  # the network refuses, and neither deserves a reset. A dead radio fails a
+  # network scan immediately with PhoneFailure; anything else answers, takes
+  # its time, or errors differently, and all of those mean the radio lives.
+  local scan
+  scan=$(timeout 90 mmcli -m "$idx" --3gpp-scan --timeout=80 2>&1)
+  if [[ $? -eq 0 || $(tr '[:upper:]' '[:lower:]' <<<"$scan") != *phone*failure* ]]; then
+    printf '%s' "$idx"
+    return 0
+  fi
+
+  echo "Modem enumerated but the radio is dead (${window}s idle, no signal, scan refused); resetting…" >&2
   notify "Resetting the modem — the radio came back dead"
   timeout 45 mmcli -m "$idx" --reset >/dev/null 2>&1 || { printf '%s' "$idx"; return 1; }
   cache_flush
