@@ -4,10 +4,20 @@ A cellular plugin for [Omarchy](https://omarchy.org/). It adds a bar widget with
 control panel, and a CLI. NetworkManager, ModemManager and busctl do the work of managing
 the modem.
 
-<p>
-  <img src="preview.png" alt="The Cellular panel as it sits day to day" width="46%">
-  <img src="preview-expanded.png" alt="The Cellular panel with every section opened" width="46%">
-</p>
+<table>
+<tr valign="top">
+<td width="50%"><img src="preview.png" alt="The Cellular panel at rest"><br>
+<sub>The panel: active card, connection stats, signal history, data meter, radio mode.</sub></td>
+<td width="50%"><img src="preview-sims.png" alt="SIM card selection"><br>
+<sub>Every card the modem holds — physical and eSIM profiles — switched with a click. Opening a section folds the rest away.</sub></td>
+</tr>
+<tr valign="top">
+<td><img src="preview-carriers.png" alt="The carrier database browser"><br>
+<sub>The carrier database inline: country, carrier, APN — applied on tap.</sub></td>
+<td><img src="preview-device.png" alt="Device details"><br>
+<sub>Device identity down to the control port. Identifiers are masked for screenshots and copied on click.</sub></td>
+</tr>
+</table>
 
 ## Install
 
