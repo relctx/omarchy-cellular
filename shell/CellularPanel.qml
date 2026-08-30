@@ -169,9 +169,11 @@ Panel {
     root.sessionSend("list")
     // Enabling through the session switches the card but skips the switch
     // bookkeeping. `settle` runs it: config follows the card, NetworkManager
-    // reapplies its settings, and the connection is brought back up.
-    if (verb === "enable" && arg !== "")
-      root.runAction([root.cli, "settle", arg])
+    // reapplies its settings, and the connection is brought back up. If
+    // another action holds the slot right now, the settle waits for it.
+    if (verb === "enable" && arg !== ""
+        && !root.runAction([root.cli, "settle", arg]))
+      root.pendingSettle = arg
     root.opened ? root.refreshDetails() : root.refresh()
   }
 
@@ -779,6 +781,7 @@ Panel {
   // Returns false when another action is already running, so callers that
   // clear their own input can keep it instead of losing it.
   property var actionFollow: []
+  property string pendingSettle: ""
   function runAction(cmd, follow) {
     if (actionProc.running) return false
     root.actionFollow = follow || []
@@ -872,6 +875,11 @@ Panel {
       var follow = root.actionFollow
       root.actionFollow = []
       if (code === 0 && follow.length > 0) { root.runAction(follow); return }
+      if (root.pendingSettle !== "") {
+        var settleArg = root.pendingSettle
+        root.pendingSettle = ""
+        if (root.runAction([root.cli, "settle", settleArg])) return
+      }
       root.opened ? root.refreshDetails() : root.refresh()
     }
   }
