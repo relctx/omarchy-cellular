@@ -1547,7 +1547,7 @@ Panel {
               height: planTrack.height
               radius: planTrack.radius
               width: Math.max(planTrack.height, planTrack.width * root.usedFraction)
-              color: root.usedFraction >= 0.9 ? root.urgent : root.barForeground
+              color: root.usedFraction >= 0.9 ? root.urgent : Color.accent
               Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
             }
 
