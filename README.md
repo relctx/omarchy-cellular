@@ -85,7 +85,7 @@ happen, and a SIM switch reports each stage instead of holding one spinner.
   messages. One box opens at a time. Settings sits apart on the right.
 
 The bar widget's own settings (default poll interval, sparkline enable, message
-notifications) are in Omarchy's bar widget settings; a `tune` value overrides where
+notifications) are in Omarchy's bar widget settings; a `settings` value overrides where
 both exist.
 
 <br clear="both">
@@ -152,13 +152,13 @@ preset (full stats, a condensed grid, a split chart-beside-stats view, chart onl
 stats only, or hidden), the chart metric, and the chart period. Polling holds the
 idle fallback poll. Network holds IP type, route metric, and operator ID. Modem
 selects which device the plugin drives on a machine with more than one. The form
-reads and writes `cellular.conf`; the `tune` verb is the same interface from the
+reads and writes `cellular.conf`; the `settings` verb is the same interface from the
 terminal.
 
 ```sh
-omarchy-cellular tune stats compact      # the split chart view
-omarchy-cellular tune spark-metric snr
-omarchy-cellular tune interval 120
+omarchy-cellular settings stats compact      # the split chart view
+omarchy-cellular settings spark-metric snr
+omarchy-cellular settings interval 120
 ```
 
 <br clear="both">
@@ -188,7 +188,7 @@ omarchy-cellular cells               carriers in use and every cell heard
 omarchy-cellular sms [delete <id>]   read or delete stored text messages
 omarchy-cellular devices             every modem present; * marks the one driven
 omarchy-cellular device <port|auto>  drive one modem, disable the rest
-omarchy-cellular tune <key> [value]  panel tunables: stats (layout preset),
+omarchy-cellular settings <key> [value]  panel settings: stats (layout preset),
                                      spark-metric, spark-minutes, interval,
                                      ip-type, route-metric, operator-id
 omarchy-cellular at '<command>'      one AT command, manual diagnostics only

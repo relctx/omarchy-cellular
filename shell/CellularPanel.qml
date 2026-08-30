@@ -412,18 +412,18 @@ Panel {
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i]
       if (d.pending !== "" && d.pending !== d.current)
-        cmds.push(d.verb === "tune" ? [cli, "tune", d.tuneKey, d.pending]
+        cmds.push(d.verb === "settings" ? [cli, "settings", d.tuneKey, d.pending]
                                     : [cli, d.verb, d.pending])
       d.pending = ""
     }
     if (tunePeriodField.text.trim() !== String(info.spark_minutes || ""))
-      cmds.push([cli, "tune", "spark-minutes", tunePeriodField.text.trim()])
+      cmds.push([cli, "settings", "spark-minutes", tunePeriodField.text.trim()])
     if (tuneMetricField.text.trim() !== String(info.route_metric || ""))
-      cmds.push([cli, "tune", "route-metric", tuneMetricField.text.trim()])
+      cmds.push([cli, "settings", "route-metric", tuneMetricField.text.trim()])
     if (tuneOperatorField.text.trim() !== String(info.operator_id || ""))
-      cmds.push([cli, "tune", "operator-id", tuneOperatorField.text.trim()])
+      cmds.push([cli, "settings", "operator-id", tuneOperatorField.text.trim()])
     if (tuneIntervalField.text.trim() !== String(info.poll_interval || ""))
-      cmds.push([cli, "tune", "interval", tuneIntervalField.text.trim()])
+      cmds.push([cli, "settings", "interval", tuneIntervalField.text.trim()])
     if (cmds.length === 0) return
     runAction(cmds[0], cmds.slice(1))
   }
@@ -840,7 +840,7 @@ Panel {
     if (verb === "carrier") return cmd[2] === "auto" ? "Detecting carrier…" : "Setting carrier…"
     if (verb === "autoconnect") return "Saving…"
     if (verb === "roaming") return "Saving…"
-    if (verb === "tune") return "Saving…"
+    if (verb === "settings") return "Saving…"
     if (verb === "profile") return "Updating the eSIM…"
     if (verb === "-c") return "Detecting carrier…"
     return "Working…"
@@ -3875,7 +3875,7 @@ Column {
     property string current: ""
     property string pending: ""
     property string tuneKey: ""
-    property string verb: "tune"
+    property string verb: "settings"
     width: parent.width
     implicitHeight: dropCtl.implicitHeight
 
@@ -3936,7 +3936,7 @@ Column {
       placeholderText: parent.hint
       foreground: root.barForeground
       enabled: !root.busy
-      onAccepted: root.runAction([root.cli, "tune", parent.tuneKey, text.trim()])
+      onAccepted: root.runAction([root.cli, "settings", parent.tuneKey, text.trim()])
     }
   }
 

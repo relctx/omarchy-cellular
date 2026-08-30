@@ -2164,7 +2164,7 @@ emit_devices() {
 
 # Panel-editable knobs from cellular.conf, whitelisted and validated.
 # Bare key prints the stored value; setting an NM-backed key reapplies.
-cmd_tune() {
+cmd_settings() {
   local key="${1:-}" val="${2-}" ck="" apply=0
   case $key in
   ip-type) ck=IP_TYPE apply=1 ;;
@@ -2176,7 +2176,7 @@ cmd_tune() {
   stats) ck=STATS ;;
   *)
     cat >&2 <<'EOF'
-usage: omarchy-cellular tune <key> [value]
+usage: omarchy-cellular settings <key> [value]
 
   ip-type        ipv4 | ipv6 | ipv4v6
   route-metric   default-route metric (blank for 700)
@@ -3803,7 +3803,7 @@ esim-session) cmd_esim_session ;;
 sims) cmd_sims ;;
 settle) cmd_settle "${2:-}" ;;
 devices) cmd_devices ;;
-tune) shift; cmd_tune "$@" ;;
+settings) shift; cmd_settings "$@" ;;
 device) cmd_device "${2:-}" ;;
 cells) cmd_cells ;;
 sms) cmd_sms "${2:-}" "${3:-}" ;;
@@ -3853,7 +3853,7 @@ usage: omarchy-cellular <command>
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
   devices             every modem present; * marks the one driven
-  tune <key> [value]  panel tunables; bare `tune x` shows usage
+  settings <key> [value]  panel settings; bare `settings x` shows usage
   device [<port>|<imei>|auto]  drive one modem, disable the rest; auto undoes
   sims                every card this modem can be, one per line
   use <iccid>         become one of them: slot switch, profile enable, or both
