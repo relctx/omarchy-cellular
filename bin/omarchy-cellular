@@ -2426,7 +2426,7 @@ esim_run() {
   # is mid-APDU. flock also makes repeated panel clicks safe.
   mkdir -p "$STATE_DIR" 2>/dev/null
   local lock
-  exec {lock}>"$STATE_DIR/lpac.lock" 2>/dev/null || true
+  { exec {lock}>"$STATE_DIR/lpac.lock"; } 2>/dev/null || true
   flock -w 90 "$lock" 2>/dev/null || true
 
   local out rc
@@ -2492,7 +2492,7 @@ esim_run() {
   rc=$?
 
   flock -u "$lock" 2>/dev/null || true
-  exec {lock}>&- 2>/dev/null || true
+  { exec {lock}>&-; } 2>/dev/null || true
 
   ESIM_JSON=$(sed "/^===LPAC-LIST===\$/,\$d" <<<"$out")
   ESIM_LIST_JSON=$(sed -n "/^===LPAC-LIST===\$/,\$p" <<<"$out" | tail -n +2)
@@ -2623,7 +2623,7 @@ cmd_esim_session() {
 
   local lock
   mkdir -p "$STATE_DIR" 2>/dev/null
-  exec {lock}>"$STATE_DIR/lpac.lock" 2>/dev/null || true
+  { exec {lock}>"$STATE_DIR/lpac.lock"; } 2>/dev/null || true
   flock -w 10 "$lock" 2>/dev/null || {
     echo "Another eSIM operation is running." >&2
     return 1
@@ -2768,7 +2768,7 @@ cmd_esim_session() {
   done
 
   printf 'quit\n' >&"${PRIV[1]}" 2>/dev/null || true
-  exec {lock}>&- 2>/dev/null || true
+  { exec {lock}>&-; } 2>/dev/null || true
 }
 
 # Guard shared by every profile command.
