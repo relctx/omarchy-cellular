@@ -71,7 +71,7 @@ The bar icon opens the control panel. Right-click toggles cellular, middle-click
 refreshes.
 
 The panel is event-driven: ModemManager and NetworkManager signals update it as they
-happen, and a SIM switch narrates its stages instead of holding one spinner.
+happen, and a SIM switch reports each stage instead of holding one spinner.
 
 - **Connect switch**, operator, technology, status.
 - **Connection stats and chart**: signal metrics colored at their 3GPP thresholds,
