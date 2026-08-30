@@ -1505,6 +1505,12 @@ Panel {
               InfoPair { size: Style.font.caption; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
               InfoPair { size: Style.font.caption; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
               InfoPair { size: Style.font.caption; label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
+              InfoPair {
+                size: Style.font.caption
+                label: "Signal"
+                value: (root.info.signal || "0") + "%"
+                valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground
+              }
               InfoPair { size: Style.font.caption; label: "Tech"; value: root.info.tech || "—" }
             }
           }
