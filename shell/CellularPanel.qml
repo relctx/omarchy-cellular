@@ -247,6 +247,10 @@ Panel {
   // share a line, so a metric change restarts the history.
   property var rsrpHistory: []
   property string sparkMetric: ""
+  readonly property int sparkMinutes: {
+    var m = parseInt(info.spark_minutes)
+    return m >= 1 ? m : 5
+  }
   property double sparkGapStart: 0
   function recordStrength(rsrp, rssi) {
     var now = Date.now()
@@ -255,17 +259,27 @@ Panel {
     // history and blinked the chart. Stay on the current metric through
     // gaps; a sample without it is skipped, and only a sustained absence
     // (45s) switches to whatever is still reporting.
-    var metric = sparkMetric || (rsrp ? "RSRP" : rssi ? "RSSI" : "")
-    if (metric === "") return
-    var raw = metric === "RSRP" ? rsrp : rssi
-    if (!raw) {
-      if (sparkGapStart === 0) { sparkGapStart = now; return }
-      if (now - sparkGapStart < 45000) return
-      var alt = rsrp ? "RSRP" : rssi ? "RSSI" : ""
-      if (alt === "") return
-      metric = alt
+    // A configured metric pins the chart to it; samples without it are
+    // gaps, never a reason to switch.
+    var forced = String(info.spark_metric || "auto").toLowerCase()
+    var metric, raw
+    if (forced === "rsrp" || forced === "rssi") {
+      metric = forced.toUpperCase()
       raw = metric === "RSRP" ? rsrp : rssi
-      rsrpHistory = []
+      if (!raw) return
+    } else {
+      metric = sparkMetric || (rsrp ? "RSRP" : rssi ? "RSSI" : "")
+      if (metric === "") return
+      raw = metric === "RSRP" ? rsrp : rssi
+      if (!raw) {
+        if (sparkGapStart === 0) { sparkGapStart = now; return }
+        if (now - sparkGapStart < 45000) return
+        var alt = rsrp ? "RSRP" : rssi ? "RSSI" : ""
+        if (alt === "") return
+        metric = alt
+        raw = metric === "RSRP" ? rsrp : rssi
+        rsrpHistory = []
+      }
     }
     sparkGapStart = 0
     var v = parseFloat(raw)
@@ -274,7 +288,7 @@ Panel {
     sparkMetric = metric
     if (h.length > 0 && now - h[h.length - 1].t < 2000) return
     h.push({ t: now, v: v })
-    while (h.length > 0 && now - h[0].t > 300000) h.shift()
+    while (h.length > 0 && now - h[0].t > sparkMinutes * 60000) h.shift()
     rsrpHistory = h
   }
 
@@ -284,6 +298,11 @@ Panel {
   function toggleMgmt(v) {
     mgmtView = (mgmtView === v) ? "" : v
     if (mgmtView === "apn") carrierExpanded = true
+    if (mgmtView === "tune") {
+      tuneIntervalField.text = info.poll_interval || ""
+      tuneMetricField.text = info.route_metric || ""
+      tuneOperatorField.text = info.operator_id || ""
+    }
     if (mgmtView === "device") deviceExpanded = true
     if (mgmtView !== "sim" && esimExpanded) {
       esimExpanded = false
@@ -774,6 +793,7 @@ Panel {
     if (verb === "carrier") return cmd[2] === "auto" ? "Detecting carrier…" : "Setting carrier…"
     if (verb === "autoconnect") return "Saving…"
     if (verb === "roaming") return "Saving…"
+    if (verb === "tune") return "Saving…"
     if (verb === "profile") return "Updating the eSIM…"
     if (verb === "-c") return "Detecting carrier…"
     return "Working…"
@@ -1072,7 +1092,10 @@ Panel {
   // whatever a dead monitor or a missed signal left behind. It is also the
   // usage meter's heartbeat, so it stays regular rather than rare.
   Timer {
-    interval: Math.max(30, root.setting("interval", 60)) * 1000
+    interval: {
+      var p = parseInt(root.info.poll_interval)
+      return (p >= 10 ? p : Math.max(30, root.setting("interval", 60))) * 1000
+    }
     running: !root.opened
     repeat: true
     triggeredOnStart: true
@@ -1356,7 +1379,7 @@ Panel {
               textFormat: Text.PlainText
               id: sparkTitle
               anchors.left: parent.left
-              text: (root.sparkMetric || "RSRP") + " · LAST 5 MIN"
+              text: (root.sparkMetric || "RSRP") + " · LAST " + root.sparkMinutes + " MIN"
               color: root.barForeground
               opacity: 0.5
               font.family: root.fontFamily
@@ -2015,6 +2038,20 @@ Panel {
               if (root.mgmtView === "sms") root.loadSms()
             }
           }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰒓"
+            tooltipText: "Tunables"
+            bordered: true
+            active: root.mgmtView === "tune"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("tune")
+          }
         }
 
         // ---------- Messages (behind its chip) ----------
@@ -2655,6 +2692,117 @@ Panel {
           }
         }
 
+        // ---------- Tunables (behind its chip) ----------
+        PanelSeparator {
+          visible: root.hwPresent && root.mgmtView === "tune"
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.hwPresent && root.mgmtView === "tune"
+          width: parent.width
+          spacing: Style.space(8)
+
+          PanelSectionHeader {
+            text: "TUNABLES"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+          }
+
+          TunePills {
+            label: "SPARKLINE"
+            options: [{ id: "auto", label: "Auto" }, { id: "rsrp", label: "RSRP" }, { id: "rssi", label: "RSSI" }]
+            current: root.info.spark_metric || "auto"
+            tuneKey: "spark-metric"
+          }
+
+          TunePills {
+            label: "WINDOW"
+            options: [{ id: "5", label: "5m" }, { id: "15", label: "15m" }, { id: "30", label: "30m" }]
+            current: String(root.sparkMinutes)
+            tuneKey: "spark-minutes"
+          }
+
+          TunePills {
+            label: "IP TYPE"
+            options: [{ id: "ipv4v6", label: "v4+v6" }, { id: "ipv4", label: "v4" }, { id: "ipv6", label: "v6" }]
+            current: root.info.ip_type || "ipv4v6"
+            tuneKey: "ip-type"
+          }
+
+          TuneField {
+            id: tuneIntervalField
+            label: "POLL SECONDS"
+            hint: "60"
+            tuneKey: "interval"
+          }
+
+          TuneField {
+            id: tuneMetricField
+            label: "ROUTE METRIC"
+            hint: "700"
+            tuneKey: "route-metric"
+          }
+
+          TuneField {
+            id: tuneOperatorField
+            label: "OPERATOR ID"
+            hint: "automatic"
+            tuneKey: "operator-id"
+          }
+
+          // Only on machines with more than one modem. Selection is
+          // exclusive: the chosen modem is enabled, the others disabled.
+          Item {
+            width: parent.width
+            visible: root.devices.length > 1
+            implicitHeight: devDrop.implicitHeight
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "MODEM"
+              color: root.barForeground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+            }
+
+            Dropdown {
+              id: devDrop
+              anchors.right: parent.right
+              width: Math.round(parent.width * 0.62)
+              showLabel: false
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              options: root.devices.map(function (d) {
+                return { value: d.port, label: (d.model || "Modem") + " · " + d.port }
+              })
+              value: {
+                for (var i = 0; i < root.devices.length; i++)
+                  if (root.devices[i].active === "yes") return root.devices[i].port
+                return ""
+              }
+              onChanged: function (v) {
+                if (v !== "") root.runAction([root.cli, "device", v])
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.devices.length > 1
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Selecting a modem disables the others."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
         // ---------- Device (behind its chip) ----------
         PanelSeparator {
           visible: root.hwPresent && root.mgmtView === "device"
@@ -2779,75 +2927,6 @@ Panel {
             InfoPair { label: "Firmware"; value: root.info.firmware || "—" }
             InfoPair { label: "Device path"; value: root.info.port ? "/dev/" + root.info.port : "—"; copyValue: root.info.port ? "/dev/" + root.info.port : "" }
 
-            // Modem picker, only on machines with more than one. Selection
-            // is exclusive; the caption below carries that meaning.
-            Column {
-              width: parent.width
-              visible: root.devices.length > 1
-              spacing: Style.space(1)
-
-              Repeater {
-                model: root.devices
-                delegate: Item {
-                  id: devRow
-                  required property var modelData
-                  width: parent.width
-                  height: devLabel.implicitHeight + Style.space(4)
-
-                  Rectangle {
-                    anchors.fill: parent
-                    radius: Style.cornerRadius
-                    color: root.barForeground
-                    opacity: devArea.containsMouse && devRow.modelData.active !== "yes" ? 0.08 : 0
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    id: devLabel
-                    anchors.left: parent.left
-                    anchors.leftMargin: Style.space(3)
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: (devRow.modelData.active === "yes" ? "● " : "○ ")
-                          + (devRow.modelData.model || "Modem")
-                    color: root.barForeground
-                    opacity: devRow.modelData.active === "yes" ? 1 : 0.6
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.right: parent.right
-                    anchors.rightMargin: Style.space(3)
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: devRow.modelData.port ? "/dev/" + devRow.modelData.port : ""
-                    color: root.barForeground
-                    opacity: 0.45
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-
-                  MouseArea {
-                    id: devArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: devRow.modelData.active === "yes" ? Qt.ArrowCursor : Qt.PointingHandCursor
-                    onClicked: if (devRow.modelData.active !== "yes")
-                      root.runAction([root.cli, "device", devRow.modelData.port])
-                  }
-                }
-              }
-
-              Text {
-                textFormat: Text.PlainText
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: "Selecting a modem disables the others."
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
           }
           }
         }
@@ -3558,6 +3637,94 @@ Column {
         text: switchRow.tip
         fontFamily: root.fontFamily
       }
+    }
+  }
+
+  // A tunable with a few fixed choices: label left, one pill per choice.
+  component TunePills: Item {
+    property string label: ""
+    property var options: []
+    property string current: ""
+    property string tuneKey: ""
+    width: parent.width
+    implicitHeight: pillRow.implicitHeight
+
+    Text {
+      textFormat: Text.PlainText
+      id: pillLabel
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      text: parent.label
+      color: root.barForeground
+      opacity: 0.6
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+
+    Row {
+      id: pillRow
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(4)
+      readonly property real avail: Math.max(0, parent.width - pillLabel.implicitWidth - Style.space(10))
+      readonly property real cellWidth: Math.min(Style.space(44),
+        (avail - spacing * (parent.options.length - 1)) / Math.max(1, parent.options.length))
+      enabled: !root.busy
+      opacity: root.busy ? 0.5 : 1
+
+      Repeater {
+        model: pillRow.parent.options
+        Button {
+          required property var modelData
+          width: pillRow.cellWidth
+          fontSize: Style.font.caption
+          verticalPadding: Style.space(2)
+          text: modelData.label
+          bordered: true
+          active: pillRow.parent.current === modelData.id
+          foreground: root.barForeground
+          fontFamily: root.fontFamily
+          onClicked: if (pillRow.parent.current !== modelData.id)
+            root.runAction([root.cli, "tune", pillRow.parent.tuneKey, modelData.id])
+        }
+      }
+    }
+  }
+
+  // A typed tunable: label left, a small field right, saved on Enter.
+  component TuneField: Item {
+    property string label: ""
+    property string hint: ""
+    property string tuneKey: ""
+    property alias text: tuneInput.text
+    width: parent.width
+    implicitHeight: tuneInput.implicitHeight
+
+    Text {
+      textFormat: Text.PlainText
+      id: fieldLabel
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      text: parent.label
+      color: root.barForeground
+      opacity: 0.6
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+
+    TextField {
+      id: tuneInput
+      anchors.right: parent.right
+      width: Style.space(80)
+      font.pixelSize: Style.font.caption
+      verticalPadding: Style.space(2)
+      horizontalAlignment: TextInput.AlignRight
+      placeholderText: parent.hint
+      foreground: root.barForeground
+      enabled: !root.busy
+      onAccepted: root.runAction([root.cli, "tune", parent.tuneKey, text.trim()])
     }
   }
 

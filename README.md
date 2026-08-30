@@ -81,8 +81,10 @@ happen, and a SIM switch narrates its stages instead of holding one spinner.
 - **Data usage**: per-card meter with the calendar's position ticked on the bar, the
   counting start stamped, and cutoff as a switch.
 - **Radio mode**: auto, 5G, 4G, 3G.
-- **Management chips**: Device details, SIM cards, APN and carrier, cell diagnostics —
-  one box open at a time.
+- **Management chips**: Device details, SIM cards, APN and carrier, cell diagnostics,
+  messages, tunables — one box open at a time. Tunables holds the sparkline metric and
+  window, poll interval, IP type, route metric, operator ID, and — with more than one
+  modem — the modem selector.
 - **SIM cards**: every identity the modem can be — the physical card and each eSIM
   profile — as tiles; one click switches, whatever that takes underneath. eSIM
   management lists profiles by ICCID with rename, delete and install.
@@ -122,6 +124,8 @@ omarchy-cellular cells               carriers in use and every cell heard
 omarchy-cellular sms [delete <id>]   read or delete stored text messages
 omarchy-cellular devices             every modem present; * marks the one driven
 omarchy-cellular device <port|auto>  drive one modem, disable the rest
+omarchy-cellular tune <key> [value]  panel tunables: ip-type, route-metric,
+                                     operator-id, spark-metric, spark-minutes, interval
 omarchy-cellular at '<command>'      one AT command, manual diagnostics only
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
