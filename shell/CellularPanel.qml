@@ -334,6 +334,10 @@ Panel {
   // The card list, parsed from the same feed as everything else.
   property var sims: []
 
+  // Every modem present. The Device box shows a picker only when there is
+  // more than one.
+  property var devices: []
+
   // Text messages: loaded when the box opens and when one arrives. The
   // Messaging.Added signal rides the same event feed as everything else.
   property string euiccFree: ""
@@ -671,6 +675,7 @@ Panel {
     if (freshSims.length > 0 || sims.length === 0
         || next.state === "nosim" || next.state === "absent" || next.hw !== "yes")
       sims = freshSims
+    devices = parseIndexed(raw, "dev")
     recordStrength(next.sig_rsrp, next.sig_rssi)
   }
 
@@ -759,6 +764,7 @@ Panel {
     if (verb === "use") return "Switching SIM…"
     if (verb === "mode") return "Setting radio mode…"
     if (verb === "settle") return "Reconnecting…"
+    if (verb === "device") return "Switching modem…"
     if (verb === "apply") return "Applying…"
     if (verb === "carrier") return cmd[2] === "auto" ? "Detecting carrier…" : "Setting carrier…"
     if (verb === "autoconnect") return "Saving…"
@@ -2749,6 +2755,65 @@ Panel {
             InfoPair { label: "Modem"; value: root.info.model || "—" }
             InfoPair { label: "Firmware"; value: root.info.firmware || "—" }
             InfoPair { label: "Port"; value: root.info.port || "—" }
+
+            // Modem picker, only on machines with more than one.
+            Column {
+              width: parent.width
+              visible: root.devices.length > 1
+              spacing: Style.space(1)
+
+              Repeater {
+                model: root.devices
+                delegate: Item {
+                  id: devRow
+                  required property var modelData
+                  width: parent.width
+                  height: devLabel.implicitHeight + Style.space(4)
+
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Style.cornerRadius
+                    color: root.barForeground
+                    opacity: devArea.containsMouse && devRow.modelData.active !== "yes" ? 0.08 : 0
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: devLabel
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(3)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: (devRow.modelData.active === "yes" ? "● " : "○ ")
+                          + (devRow.modelData.model || "Modem")
+                    color: root.barForeground
+                    opacity: devRow.modelData.active === "yes" ? 1 : 0.6
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(3)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: devRow.modelData.port || ""
+                    color: root.barForeground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+
+                  MouseArea {
+                    id: devArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: devRow.modelData.active === "yes" ? Qt.ArrowCursor : Qt.PointingHandCursor
+                    onClicked: if (devRow.modelData.active !== "yes")
+                      root.runAction([root.cli, "device", devRow.modelData.port])
+                  }
+                }
+              }
+            }
           }
           }
         }

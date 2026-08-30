@@ -434,15 +434,20 @@ kv() {
   ' <<<"$1"
 }
 
+# Every modem object ModemManager currently exposes, one index per line.
+modem_list() {
+  # The bus answers this exactly; `mmcli -L` warns on stderr while a modem
+  # is being rebuilt.
+  busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
+    sed -n 's|.*/Modem/\([0-9]\{1,\}\)$|\1|p'
+}
+
 modem_index() {
   local f="$CACHE_DIR/index"
   [[ -s $f ]] || {
     mkdir -p "$CACHE_DIR"
-    # The bus answers this exactly; `mmcli -L` warns on stderr while a modem
-    # is being rebuilt.
     local idxs want i d
-    idxs=$(busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
-      sed -n 's|.*/Modem/\([0-9]\{1,\}\)$|\1|p')
+    idxs=$(modem_list)
     # DEVICE in cellular.conf picks one modem on a multi-modem machine, by
     # primary port name (wwan1mbim0) or IMEI. Unset means the first modem
     # ModemManager lists, which on a one-modem machine is the only one.
@@ -2104,6 +2109,68 @@ card_track() {
   mkdir -p "$STATE_DIR" && printf '%s' "$i" >"$f"
 }
 
+
+# Every modem present, as indexed feed lines; the captured one is marked.
+emit_devices() {
+  local cur i d n=0 port model imei
+  cur=$(modem_index)
+  for i in $(modem_list); do
+    d=$(modem_dump "$i") || continue
+    port=$(kv "$d" modem.generic.primary-port)
+    model=$(kv "$d" modem.generic.model)
+    imei=$(kv "$d" modem.generic.equipment-identifier)
+    printf 'dev.%d.port=%s\n' "$n" "$port"
+    printf 'dev.%d.model=%s\n' "$n" "$model"
+    printf 'dev.%d.imei=%s\n' "$n" "$imei"
+    printf 'dev.%d.active=%s\n' "$n" "$([[ $i == "$cur" ]] && echo yes || echo no)"
+    n=$((n + 1))
+  done
+}
+
+cmd_devices() {
+  local cur i d port model
+  cur=$(modem_index)
+  for i in $(modem_list); do
+    d=$(modem_dump "$i") || continue
+    port=$(kv "$d" modem.generic.primary-port)
+    model=$(kv "$d" modem.generic.model)
+    printf '%s %s  %s  (imei %s)\n' \
+      "$([[ $i == "$cur" ]] && echo '*' || echo ' ')" \
+      "${port:-?}" "${model:-unknown}" \
+      "$(kv "$d" modem.generic.equipment-identifier)"
+  done
+}
+
+# Bare: print the configured selection. `auto` clears it. Anything else must
+# match a present modem's primary port or IMEI before it is stored.
+cmd_device() {
+  local want="${1:-}" i d
+  if [[ -z $want ]]; then
+    get_cfg DEVICE
+    return 0
+  fi
+  if [[ $want == auto ]]; then
+    set_cfg DEVICE ""
+    cache_flush
+    echo "Selection cleared; the first modem ModemManager lists is used."
+    return 0
+  fi
+  for i in $(modem_list); do
+    d=$(modem_dump "$i") || continue
+    if [[ $(kv "$d" modem.generic.primary-port) == "$want" ]] ||
+      [[ $(kv "$d" modem.generic.equipment-identifier) == "$want" ]]; then
+      set_cfg DEVICE "$want"
+      cache_flush
+      echo "Driving $want."
+      return 0
+    fi
+  done
+  echo "No present modem matches '$want' by primary port or IMEI." >&2
+  echo "Present modems:" >&2
+  cmd_devices >&2
+  return 1
+}
+
 cmd_panel() {
   read_state
   card_track
@@ -2141,6 +2208,7 @@ cmd_panel() {
   printf 'model=%s\n' "$MODEL"
   printf 'firmware=%s\n' "$FIRMWARE"
   printf 'port=%s\n' "$PORT"
+  emit_devices
   printf 'modes_allowed=%s\n' "$MODES_ALLOWED"
   printf 'modes_preferred=%s\n' "$MODES_PREFERRED"
   printf 'modes_supported=%s\n' "$MODES_SUPPORTED"
@@ -3502,6 +3570,8 @@ signal) cmd_signal ;;
 esim-session) cmd_esim_session ;;
 sims) cmd_sims ;;
 settle) cmd_settle "${2:-}" ;;
+devices) cmd_devices ;;
+device) cmd_device "${2:-}" ;;
 cells) cmd_cells ;;
 sms) cmd_sms "${2:-}" "${3:-}" ;;
 use) cmd_use "${2:-}" ;;
@@ -3549,6 +3619,8 @@ usage: omarchy-cellular <command>
   mode [auto|5g|4g|3g]  show or set the radio mode
   identify            re-read ICCID/EID that ModemManager cannot
   apply               re-read cellular.conf and reconnect
+  devices             every modem present; * marks the one driven
+  device [<port>|<imei>|auto]  pick which modem to drive; bare: show config
   sims                every card this modem can be, one per line
   use <iccid>         become one of them: slot switch, profile enable, or both
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
