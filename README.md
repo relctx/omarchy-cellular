@@ -18,11 +18,20 @@ the modem's own control port.
 
 For anyone coming from the 1.0.x marketplace build:
 
-- **eSIM without disruption.** Profile operations now run over the modem's MBIM or
-  QMI control port through lpac. The connection stays up; nothing is stopped. One
-  authorization covers a whole management session. This adds the `lpac-git`
-  requirement, and eSIM management degrades to an install hint without it.
-  Everything else works either way.
+- **eSIM management without disruption.** Profile operations now use the modem's
+  MBIM or QMI control port instead of AT commands. The connection stays up;
+  nothing is stopped. One authorization covers a whole management session.
+  This adds the `lpac-git` requirement; existing users should remove `lpac`
+  and install `lpac-git` (`lpac` pulls in `libeuicc` and friends, which
+  `lpac-git` provides itself):
+
+  ```sh
+  yay -Rns lpac libeuicc
+  yay -S lpac-git
+  ```
+
+  Without it, eSIM management degrades to an install hint. Everything else
+  works either way.
 - **AT transport removed** from every automatic path. The manual `at` command
   remains for diagnostics.
 - **Event-driven panel.** ModemManager and NetworkManager signals drive updates;
