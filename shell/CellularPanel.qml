@@ -2758,11 +2758,12 @@ Panel {
             tuneKey: "operator-id"
           }
 
-          // Only on machines with more than one modem. Selection is
-          // exclusive: the chosen modem is enabled, the others disabled.
+          // Which modem is driven. With one modem this is a statement;
+          // with several, selection is exclusive: the chosen modem is
+          // enabled, the others disabled.
           Item {
             width: parent.width
-            visible: root.devices.length > 1
+            visible: root.devices.length > 0
             implicitHeight: devDrop.implicitHeight
 
             Text {
