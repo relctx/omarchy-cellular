@@ -1355,10 +1355,20 @@ Panel {
           rowSpacing: Style.spacing.labelGap
           readonly property real cellW: (width - columnSpacing) / 2
 
-          InfoPair { width: parent.cellW; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
-          InfoPair { width: parent.cellW; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
-          InfoPair { width: parent.cellW; label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
+          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+          InfoPair {
+            width: parent.cellW
+            label: "Ping"
+            value: root.formatPing(root.pingLatency)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
           InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
+          InfoPair {
+            width: parent.cellW
+            label: "Packet Loss"
+            value: root.formatLoss(root.packetLoss)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
           InfoPair { width: parent.cellW; label: "Tech"; value: root.info.tech || "—" }
           InfoPair {
             width: parent.cellW
@@ -1587,15 +1597,27 @@ Panel {
               opacity: root.mgmtView === "" ? 0 : 1
               Behavior on opacity { NumberAnimation { duration: 150 } }
 
-              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
-              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
-              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
+              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+              InfoPair {
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Ping"
+                value: root.formatPing(root.pingLatency)
+                valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+              }
               InfoPair {
                 width: sparkStats.cellW
                 size: Style.font.caption
                 label: "Signal"
                 value: (root.info.signal || "0") + "%"
                 valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground
+              }
+              InfoPair {
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Packet Loss"
+                value: root.formatLoss(root.packetLoss)
+                valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
               }
               InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "Tech"; value: root.info.tech || "—" }
               InfoPair {
