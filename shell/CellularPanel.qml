@@ -247,6 +247,7 @@ Panel {
   // share a line, so a metric change restarts the history.
   property var rsrpHistory: []
   property string sparkMetric: ""
+  readonly property bool sparkOff: info.spark_metric === "off"
   readonly property int sparkMinutes: {
     var m = parseInt(info.spark_minutes)
     return m >= 1 ? m : 5
@@ -1393,8 +1394,8 @@ Panel {
           // Stays visible once a metric exists: an empty chart during a
           // sample gap beats the whole section reflowing in and out.
           visible: root.hwPresent && root.setting("sparkline", true)
-                   && root.info.spark_metric !== "off"
-                   && (root.rsrpHistory.length >= 2 || root.sparkMetric !== "")
+                   && (root.sparkOff ? root.mgmtView !== ""
+                       : (root.rsrpHistory.length >= 2 || root.sparkMetric !== ""))
           width: parent.width
           spacing: Style.space(2)
 
@@ -1415,6 +1416,7 @@ Panel {
 
           Item {
             width: parent.width
+            visible: !root.sparkOff
             implicitHeight: sparkTitle.implicitHeight
 
             Text {
@@ -1454,7 +1456,8 @@ Panel {
             width: parent.width
             // Tall enough for the focus-mode stat rows in both modes, so
             // entering focus changes only the chart's width, not its height.
-            height: Math.max(Style.space(28), sparkStats.implicitHeight)
+            height: root.sparkOff ? sparkStats.implicitHeight
+                    : Math.max(Style.space(28), sparkStats.implicitHeight)
 
             // Focus mode narrows the chart to make room for the live numbers
             // the folded stats grid would otherwise show.
@@ -1463,7 +1466,9 @@ Panel {
               anchors.left: parent.left
               anchors.top: parent.top
               anchors.bottom: parent.bottom
-              width: root.mgmtView === "" ? parent.width : Math.round(parent.width * 0.55)
+              visible: !root.sparkOff
+              width: root.sparkOff ? 0
+                     : root.mgmtView === "" ? parent.width : Math.round(parent.width * 0.55)
               Behavior on width { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
 
             // A subtle background and border mark the chart area, in theme
@@ -1532,7 +1537,7 @@ Panel {
             Column {
               id: sparkStats
               anchors.left: sparkChart.right
-              anchors.leftMargin: Style.space(6)
+              anchors.leftMargin: root.sparkOff ? 0 : Style.space(6)
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(1)
