@@ -247,6 +247,7 @@ Panel {
   // share a line, so a metric change restarts the history.
   property var rsrpHistory: []
   property string sparkMetric: ""
+  readonly property string statsMode: info.stats || "full"
   readonly property bool sparkOff: info.spark_metric === "off"
   readonly property bool sparkPinned: info.spark_metric === "snr" || info.spark_metric === "signal"
   readonly property int sparkMinutes: {
@@ -314,6 +315,7 @@ Panel {
       tuneIntervalField.text = info.poll_interval || ""
       tunePeriodField.text = info.spark_minutes || ""
       tuneMetricDrop.pending = ""
+      tuneStatsDrop.pending = ""
       tuneIpDrop.pending = ""
       tuneDeviceDrop.pending = ""
       tuneMetricField.text = info.route_metric || ""
@@ -403,7 +405,7 @@ Panel {
 
   function tuneSave() {
     var cmds = []
-    var drops = [tuneMetricDrop, tuneIpDrop, tuneDeviceDrop]
+    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneDeviceDrop]
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i]
       if (d.pending !== "" && d.pending !== d.current)
@@ -1344,9 +1346,35 @@ Panel {
 
         // ---------- Connection stats ----------
         // Label/value pairs in two columns; ping rows turn urgent as soon as a
-        // probe is lost.
+        // probe is lost. The stats tunable picks full, minimal or hidden.
+        Grid {
+          visible: root.connected && root.statsMode === "minimal"
+          width: parent.width
+          columns: 2
+          columnSpacing: Style.space(20)
+          rowSpacing: Style.spacing.labelGap
+          readonly property real cellW: (width - columnSpacing) / 2
+
+          InfoPair { width: parent.cellW; label: "Operator"; value: root.info.operator || "—" }
+          InfoPair { width: parent.cellW; label: "Technology"; value: root.info.tech || "—" }
+          InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
+          InfoPair {
+            width: parent.cellW
+            label: "Roaming"
+            value: root.roaming ? "Yes" : "No"
+            valueColor: root.roaming ? root.urgent : root.barForeground
+          }
+          InfoPair {
+            width: parent.cellW
+            label: "Ping"
+            value: root.formatPing(root.pingLatency)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
+          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+        }
+
         Row {
-          visible: root.connected
+          visible: root.connected && root.statsMode === "full"
           width: parent.width
           spacing: Style.space(20)
 
@@ -2887,6 +2915,16 @@ Panel {
               label: "POLL SECONDS"
               hint: "60"
               tuneKey: "interval"
+            }
+
+            TuneDrop {
+              id: tuneStatsDrop
+              label: "STATS"
+              options: [{ value: "full", label: "Full" },
+                        { value: "minimal", label: "Minimal" },
+                        { value: "hidden", label: "Hidden" }]
+              current: root.statsMode
+              tuneKey: "stats"
             }
           }
 
