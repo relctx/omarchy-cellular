@@ -2734,8 +2734,9 @@ Panel {
 
           TunePills {
             label: "METRIC"
-            options: [{ id: "auto", label: "Auto" }, { id: "rsrp", label: "RSRP" },
-                      { id: "rssi", label: "RSSI" }, { id: "snr", label: "SNR" },
+            // RSRP against RSSI is the RAT's choice, not the user's; the
+            // sticky auto logic is that pair.
+            options: [{ id: "auto", label: "RSSI/RSRP" }, { id: "snr", label: "SNR" },
                       { id: "signal", label: "Sig%" }]
             current: root.info.spark_metric || "auto"
             tuneKey: "spark-metric"
