@@ -2748,6 +2748,7 @@ Panel {
             InfoPair { label: "Carrier"; value: root.info.carrier_config || "—" }
             InfoPair { label: "Modem"; value: root.info.model || "—" }
             InfoPair { label: "Firmware"; value: root.info.firmware || "—" }
+            InfoPair { label: "Port"; value: root.info.port || "—" }
           }
           }
         }

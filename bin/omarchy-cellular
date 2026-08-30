@@ -1112,7 +1112,7 @@ limit_bytes_probe() {
 
 # Sets IMEI, NUMBER, CARRIER_CFG, MODEL, FIRMWARE, MODES_ALLOWED, MODES_PREFERRED.
 read_details() {
-  IMEI="" ICCID="" EID="" SIM_TYPE="" SIM_OPERATOR="" NUMBER="" CARRIER_CFG="" MODEL="" FIRMWARE="" MODES_ALLOWED="" MODES_PREFERRED="" MODES_SUPPORTED=""
+  IMEI="" ICCID="" EID="" SIM_TYPE="" SIM_OPERATOR="" NUMBER="" CARRIER_CFG="" MODEL="" FIRMWARE="" PORT="" MODES_ALLOWED="" MODES_PREFERRED="" MODES_SUPPORTED=""
   local idx dump modes
   idx=$(modem_index) || return 0
   [[ -n $idx ]] || return 0
@@ -1148,6 +1148,7 @@ read_details() {
   CARRIER_CFG=$(kv "$dump" modem.generic.carrier-configuration)
   MODEL=$(kv "$dump" modem.generic.model)
   FIRMWARE=$(kv "$dump" modem.generic.revision)
+  PORT=$(kv "$dump" modem.generic.primary-port)
 
   # "allowed: 3g, 4g, 5g; preferred: 5g"
   modes=$(kv "$dump" modem.generic.current-modes)
@@ -2123,6 +2124,7 @@ cmd_panel() {
   printf 'carrier_config=%s\n' "$CARRIER_CFG"
   printf 'model=%s\n' "$MODEL"
   printf 'firmware=%s\n' "$FIRMWARE"
+  printf 'port=%s\n' "$PORT"
   printf 'modes_allowed=%s\n' "$MODES_ALLOWED"
   printf 'modes_preferred=%s\n' "$MODES_PREFERRED"
   printf 'modes_supported=%s\n' "$MODES_SUPPORTED"
