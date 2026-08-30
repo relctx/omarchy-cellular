@@ -304,6 +304,9 @@ Panel {
     if (mgmtView === "tune") {
       tuneIntervalField.text = info.poll_interval || ""
       tunePeriodField.text = info.spark_minutes || ""
+      tuneMetricDrop.pending = ""
+      tuneIpDrop.pending = ""
+      tuneDeviceDrop.pending = ""
       tuneMetricField.text = info.route_metric || ""
       tuneOperatorField.text = info.operator_id || ""
     }
@@ -387,6 +390,14 @@ Panel {
 
   function tuneSave() {
     var cmds = []
+    var drops = [tuneMetricDrop, tuneIpDrop, tuneDeviceDrop]
+    for (var i = 0; i < drops.length; i++) {
+      var d = drops[i]
+      if (d.pending !== "" && d.pending !== d.current)
+        cmds.push(d.verb === "tune" ? [cli, "tune", d.tuneKey, d.pending]
+                                    : [cli, d.verb, d.pending])
+      d.pending = ""
+    }
     if (tunePeriodField.text.trim() !== String(info.spark_minutes || ""))
       cmds.push([cli, "tune", "spark-minutes", tunePeriodField.text.trim()])
     if (tuneMetricField.text.trim() !== String(info.route_metric || ""))
@@ -2781,13 +2792,14 @@ Panel {
             title: "SPARKLINE GRAPH"
 
             TuneDrop {
+              id: tuneMetricDrop
               label: "METRIC"
               // RSRP against RSSI is the RAT's choice, not the user's;
               // the sticky auto logic is that pair.
               options: [{ value: "auto", label: "RSSI/RSRP" },
                         { value: "snr", label: "SNR" },
                         { value: "signal", label: "Signal quality" }]
-              value: root.info.spark_metric || "auto"
+              current: root.info.spark_metric || "auto"
               tuneKey: "spark-metric"
             }
 
@@ -2803,11 +2815,12 @@ Panel {
             title: "NETWORK"
 
             TuneDrop {
+              id: tuneIpDrop
               label: "IP TYPE"
               options: [{ value: "ipv4v6", label: "IPv4 + IPv6" },
                         { value: "ipv4", label: "IPv4" },
                         { value: "ipv6", label: "IPv6" }]
-              value: root.info.ip_type || "ipv4v6"
+              current: root.info.ip_type || "ipv4v6"
               tuneKey: "ip-type"
             }
 
@@ -2841,12 +2854,13 @@ Panel {
             title: "MODEM"
 
             TuneDrop {
+              id: tuneDeviceDrop
               label: "DEVICE"
               verb: "device"
               options: root.devices.map(function (d) {
                 return { value: d.port, label: (d.model || "Modem") + " · " + d.port }
               })
-              value: {
+              current: {
                 for (var i = 0; i < root.devices.length; i++)
                   if (root.devices[i].active === "yes") return root.devices[i].port
                 return ""
@@ -3752,11 +3766,13 @@ Column {
     }
   }
 
-  // One settings row: label left, a dropdown right.
+  // One settings row: label left, a dropdown right. A pick is staged;
+  // Save applies it.
   component TuneDrop: Item {
     property string label: ""
     property var options: []
-    property string value: ""
+    property string current: ""
+    property string pending: ""
     property string tuneKey: ""
     property string verb: "tune"
     width: parent.width
@@ -3782,11 +3798,8 @@ Column {
       foreground: root.barForeground
       fontFamily: root.fontFamily
       options: parent.options
-      value: parent.value
-      onChanged: function (v) {
-        if (parent.verb === "tune") root.runAction([root.cli, "tune", parent.tuneKey, v])
-        else root.runAction([root.cli, parent.verb, v])
-      }
+      value: parent.pending !== "" ? parent.pending : parent.current
+      onChanged: function (v) { parent.pending = v }
     }
   }
 
