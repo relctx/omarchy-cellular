@@ -74,17 +74,17 @@ The panel is event-driven: ModemManager and NetworkManager signals update it as 
 happen, and a SIM switch narrates its stages instead of holding one spinner.
 
 - **Connect switch**, operator, technology, status.
-- **Connection stats**: signal metrics colored at their 3GPP thresholds, ping, packet
-  loss, throughput, totals, IP. Click a value to copy it. A signal sparkline plots the
-  last five minutes.
+- **Connection stats and chart**: signal metrics colored at their 3GPP thresholds,
+  ping, packet loss, throughput, totals, IP. Click a value to copy it. A sparkline
+  charts RSSI/RSRP, SNR, or signal quality over a chosen window. The layout is
+  selectable: full stats, a condensed six-stat grid, a split chart-beside-stats view,
+  chart only, stats only, or hidden.
 - **Active identity**: which card, which APN, at a glance.
 - **Data usage**: per-card meter with the calendar's position ticked on the bar, the
   counting start stamped, and cutoff as a switch.
 - **Radio mode**: auto, 5G, 4G, 3G.
 - **Management chips**: Device details, SIM cards, APN and carrier, cell diagnostics,
-  messages, settings — one box open at a time. Settings holds the sparkline metric and
-  window, poll interval, IP type, route metric, operator ID, and — with more than one
-  modem — the modem selector.
+  messages — one box open at a time, with Settings apart on the right.
 - **SIM cards**: every identity the modem can be — the physical card and each eSIM
   profile — as tiles; one click switches, whatever that takes underneath. eSIM
   management lists profiles by ICCID with rename, delete and install.
@@ -92,9 +92,14 @@ happen, and a SIM switch narrates its stages instead of holding one spinner.
   with their widths, carrier aggregation totaled) and every cell the radio hears.
 - **Messages**: carrier texts read, notified on arrival, and deleted — most of what a
   data SIM ever receives. The store is the modem's own memory.
+- **Settings**: grouped, staged behind Save. Display (the layout preset, chart metric,
+  chart period), Polling (the idle fallback poll), Network (IP type, route metric,
+  operator ID), Modem (which device the plugin drives). Everything writes to
+  `cellular.conf` through the `tune` verb — the form is a view of the file.
 
-The widget's settings (poll interval, sparkline, message notifications) are in
-Omarchy's bar widget settings.
+The bar widget's own settings (default poll interval, sparkline enable, message
+notifications) are in Omarchy's bar widget settings; a `tune` value overrides where
+both exist.
 
 eSIM operations run over MBIM with the connection up. One authorization covers a whole
 management session.
@@ -124,8 +129,9 @@ omarchy-cellular cells               carriers in use and every cell heard
 omarchy-cellular sms [delete <id>]   read or delete stored text messages
 omarchy-cellular devices             every modem present; * marks the one driven
 omarchy-cellular device <port|auto>  drive one modem, disable the rest
-omarchy-cellular tune <key> [value]  panel tunables: ip-type, route-metric,
-                                     operator-id, spark-metric, spark-minutes, interval
+omarchy-cellular tune <key> [value]  panel tunables: stats (layout preset),
+                                     spark-metric, spark-minutes, interval,
+                                     ip-type, route-metric, operator-id
 omarchy-cellular at '<command>'      one AT command, manual diagnostics only
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
