@@ -2722,113 +2722,72 @@ Panel {
             fontFamily: root.fontFamily
           }
 
-          Text {
-            textFormat: Text.PlainText
-            text: "SPARKLINE GRAPH"
-            color: root.barForeground
-            opacity: 0.45
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            font.letterSpacing: 1
-          }
+          TuneGroup {
+            title: "SPARKLINE GRAPH"
 
-          Item {
-            width: parent.width
-            implicitHeight: metricDrop.implicitHeight
-
-            Text {
-              textFormat: Text.PlainText
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              text: "METRIC"
-              color: root.barForeground
-              opacity: 0.6
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.letterSpacing: 1
-            }
-
-            // RSRP against RSSI is the RAT's choice, not the user's; the
-            // sticky auto logic is that pair.
-            Dropdown {
-              id: metricDrop
-              anchors.right: parent.right
-              width: Math.round(parent.width * 0.62)
-              showLabel: false
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
+            TuneDrop {
+              label: "METRIC"
+              // RSRP against RSSI is the RAT's choice, not the user's;
+              // the sticky auto logic is that pair.
               options: [{ value: "auto", label: "RSSI/RSRP" },
                         { value: "snr", label: "SNR" },
                         { value: "signal", label: "Signal quality" }]
               value: root.info.spark_metric || "auto"
-              onChanged: function (v) { root.runAction([root.cli, "tune", "spark-metric", v]) }
+              tuneKey: "spark-metric"
+            }
+
+            TuneField {
+              id: tunePeriodField
+              label: "PERIOD (MIN)"
+              hint: "5"
+              tuneKey: "spark-minutes"
             }
           }
 
-          TuneField {
-            id: tunePeriodField
-            label: "PERIOD (MINUTES)"
-            hint: "5"
-            tuneKey: "spark-minutes"
-          }
+          TuneGroup {
+            title: "NETWORK"
 
-          Item { width: parent.width; height: Style.space(2) }
-
-          TunePills {
-            label: "IP TYPE"
-            options: [{ id: "ipv4v6", label: "v4+v6" }, { id: "ipv4", label: "v4" }, { id: "ipv6", label: "v6" }]
-            current: root.info.ip_type || "ipv4v6"
-            tuneKey: "ip-type"
-          }
-
-          TuneField {
-            id: tuneIntervalField
-            label: "POLL SECONDS"
-            hint: "60"
-            tuneKey: "interval"
-          }
-
-          TuneField {
-            id: tuneMetricField
-            label: "ROUTE METRIC"
-            hint: "700"
-            tuneKey: "route-metric"
-          }
-
-          TuneField {
-            id: tuneOperatorField
-            label: "OPERATOR ID"
-            hint: "automatic"
-            tuneKey: "operator-id"
-          }
-
-          // Which modem is driven. With one modem this is a statement;
-          // with several, selection is exclusive: the chosen modem is
-          // enabled, the others disabled.
-          Item {
-            width: parent.width
-            visible: root.devices.length > 0
-            implicitHeight: devDrop.implicitHeight
-
-            Text {
-              textFormat: Text.PlainText
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              text: "MODEM"
-              color: root.barForeground
-              opacity: 0.6
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.letterSpacing: 1
+            TuneDrop {
+              label: "IP TYPE"
+              options: [{ value: "ipv4v6", label: "IPv4 + IPv6" },
+                        { value: "ipv4", label: "IPv4" },
+                        { value: "ipv6", label: "IPv6" }]
+              value: root.info.ip_type || "ipv4v6"
+              tuneKey: "ip-type"
             }
 
-            Dropdown {
-              id: devDrop
-              anchors.right: parent.right
-              width: Math.round(parent.width * 0.62)
-              showLabel: false
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
+            TuneField {
+              id: tuneMetricField
+              label: "ROUTE METRIC"
+              hint: "700"
+              tuneKey: "route-metric"
+            }
+
+            TuneField {
+              id: tuneOperatorField
+              label: "OPERATOR ID"
+              hint: "automatic"
+              tuneKey: "operator-id"
+            }
+          }
+
+          TuneGroup {
+            title: "PANEL"
+
+            TuneField {
+              id: tuneIntervalField
+              label: "POLL SECONDS"
+              hint: "60"
+              tuneKey: "interval"
+            }
+          }
+
+          TuneGroup {
+            title: "MODEM"
+
+            TuneDrop {
+              label: "DEVICE"
+              verb: "device"
               options: root.devices.map(function (d) {
                 return { value: d.port, label: (d.model || "Modem") + " · " + d.port }
               })
@@ -2837,21 +2796,18 @@ Panel {
                   if (root.devices[i].active === "yes") return root.devices[i].port
                 return ""
               }
-              onChanged: function (v) {
-                if (v !== "") root.runAction([root.cli, "device", v])
-              }
             }
-          }
 
-          Text {
-            textFormat: Text.PlainText
-            visible: root.devices.length > 1
-            width: parent.width
-            wrapMode: Text.WordWrap
-            text: "Selecting a modem disables the others."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            Text {
+              textFormat: Text.PlainText
+              visible: root.devices.length > 1
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "Selecting a modem disables the others."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
           }
         }
 
@@ -3692,18 +3648,67 @@ Column {
     }
   }
 
-  // A tunable with a few fixed choices: label left, one pill per choice.
-  component TunePills: Item {
-    property string label: ""
-    property var options: []
-    property string current: ""
-    property string tuneKey: ""
+  // A bordered settings group: the title interrupts the top border, the
+  // rows sit inside.
+  component TuneGroup: Item {
+    property string title: ""
+    default property alias groupContent: groupInner.data
     width: parent.width
-    implicitHeight: pillRow.implicitHeight
+    implicitHeight: groupFrame.y + groupFrame.height
+
+    Rectangle {
+      id: groupFrame
+      y: Math.round(groupTitle.implicitHeight / 2)
+      width: parent.width
+      height: groupInner.y - y + groupInner.implicitHeight + Style.space(8)
+      color: "transparent"
+      border.color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.3)
+      border.width: 1
+      radius: Style.cornerRadius
+    }
+
+    Rectangle {
+      x: Style.space(6)
+      y: 0
+      width: groupTitle.implicitWidth + Style.space(6)
+      height: groupTitle.implicitHeight
+      color: Color.popups.background
+    }
 
     Text {
       textFormat: Text.PlainText
-      id: pillLabel
+      id: groupTitle
+      x: Style.space(9)
+      y: 0
+      text: parent.title
+      color: root.barForeground
+      opacity: 0.55
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+
+    Column {
+      id: groupInner
+      x: Style.space(7)
+      y: groupTitle.implicitHeight + Style.space(4)
+      width: parent.width - Style.space(14)
+      spacing: Style.space(5)
+    }
+  }
+
+  // One settings row: label left, a dropdown right.
+  component TuneDrop: Item {
+    property string label: ""
+    property var options: []
+    property string value: ""
+    property string tuneKey: ""
+    property string verb: "tune"
+    width: parent.width
+    implicitHeight: dropCtl.implicitHeight
+
+    Text {
+      textFormat: Text.PlainText
       anchors.left: parent.left
       anchors.verticalCenter: parent.verticalCenter
       text: parent.label
@@ -3714,37 +3719,23 @@ Column {
       font.letterSpacing: 1
     }
 
-    Row {
-      id: pillRow
+    Dropdown {
+      id: dropCtl
       anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      spacing: Style.space(4)
-      readonly property real avail: Math.max(0, parent.width - pillLabel.implicitWidth - Style.space(10))
-      readonly property real cellWidth: Math.min(Style.space(44),
-        (avail - spacing * (parent.options.length - 1)) / Math.max(1, parent.options.length))
-      enabled: !root.busy
-      opacity: root.busy ? 0.5 : 1
-
-      Repeater {
-        model: pillRow.parent.options
-        Button {
-          required property var modelData
-          width: pillRow.cellWidth
-          fontSize: Style.font.caption
-          verticalPadding: Style.space(2)
-          text: modelData.label
-          bordered: true
-          active: pillRow.parent.current === modelData.id
-          foreground: root.barForeground
-          fontFamily: root.fontFamily
-          onClicked: if (pillRow.parent.current !== modelData.id)
-            root.runAction([root.cli, "tune", pillRow.parent.tuneKey, modelData.id])
-        }
+      width: Math.round(parent.width * 0.62)
+      showLabel: false
+      foreground: root.barForeground
+      fontFamily: root.fontFamily
+      options: parent.options
+      value: parent.value
+      onChanged: function (v) {
+        if (parent.verb === "tune") root.runAction([root.cli, "tune", parent.tuneKey, v])
+        else root.runAction([root.cli, parent.verb, v])
       }
     }
   }
 
-  // A typed tunable: label left, a small field right, saved on Enter.
+  // One settings row: label left, a field right, saved on Enter.
   component TuneField: Item {
     property string label: ""
     property string hint: ""
@@ -3755,7 +3746,6 @@ Column {
 
     Text {
       textFormat: Text.PlainText
-      id: fieldLabel
       anchors.left: parent.left
       anchors.verticalCenter: parent.verticalCenter
       text: parent.label
@@ -3769,9 +3759,7 @@ Column {
     TextField {
       id: tuneInput
       anchors.right: parent.right
-      width: Style.space(80)
-      font.pixelSize: Style.font.caption
-      verticalPadding: Style.space(2)
+      width: Math.round(parent.width * 0.62)
       horizontalAlignment: TextInput.AlignRight
       placeholderText: parent.hint
       foreground: root.barForeground
