@@ -234,7 +234,7 @@ modem_dump() {
     # noclobber plus O_EXCL: refuse to write through a symlink or an existing
     # file, so nothing can aim this at a path of its choosing.
     set -o noclobber
-    if ! (mmcli -m "$1" -K 2>/dev/null | head -c "$MODEM_DUMP_MAX" >"$f") 2>/dev/null; then
+    if ! (timeout 10 timeout 10 mmcli -m "$1" -K 2>/dev/null | head -c "$MODEM_DUMP_MAX" >"$f") 2>/dev/null; then
       set +o noclobber
       rm -f -- "$f"
       return 1
@@ -303,7 +303,7 @@ has_control_port() {
 # fails with PhoneFailure. Seen after repeated ModemManager restarts.
 radio_wedged() {
   local dump
-  dump=$(mmcli -m "$1" -K 2>/dev/null) || return 1
+  dump=$(timeout 10 mmcli -m "$1" -K 2>/dev/null) || return 1
   [[ $(kv "$dump" modem.generic.state) == enabled ]] &&
     [[ $(kv "$dump" modem.3gpp.registration-state) == idle ]] &&
     [[ -z $(kv "$dump" modem.generic.signal-quality.value) ||
@@ -323,7 +323,7 @@ ensure_radio() {
 
   echo "Modem enumerated but the radio is dead (${window}s idle, no signal); resetting…" >&2
   notify "Resetting the modem — the radio came back dead"
-  mmcli -m "$idx" --reset >/dev/null 2>&1 || { printf '%s' "$idx"; return 1; }
+  timeout 45 mmcli -m "$idx" --reset >/dev/null 2>&1 || { printf '%s' "$idx"; return 1; }
   cache_flush
   idx=$(wait_for_new_modem "$idx" 90) || return 1
   printf '%s' "$idx"
@@ -383,9 +383,9 @@ nm_preflight() {
     echo "No cellular modem found. Is the card enabled in BIOS?" >&2
     return 1
   }
-  mmcli -m "$idx" --set-power-state-on >/dev/null 2>&1
+  timeout 45 mmcli -m "$idx" --set-power-state-on >/dev/null 2>&1
   idx=$(ensure_control_port "$idx") || return 1
-  mmcli -m "$idx" --enable >/dev/null 2>&1
+  timeout 45 mmcli -m "$idx" --enable >/dev/null 2>&1
   # Short window: the user is waiting on a click, and nm_up has its own 45s.
   idx=$(ensure_radio "$idx" 20) || return 1
   return 0
@@ -1436,7 +1436,7 @@ cmd_apn_list() {
 
   local b bdump bapn bip bconn
   for b in $(sed -n 's/^[[:space:]]*modem\.generic\.bearers\.value\[[0-9]*\][[:space:]]*:[[:space:]]*//p' <<<"$dump"); do
-    bdump=$(mmcli -b "$b" -K 2>/dev/null) || continue
+    bdump=$(timeout 10 mmcli -b "$b" -K 2>/dev/null) || continue
     bapn=$(kv "$bdump" bearer.properties.apn)
     [[ -n $bapn && $bapn != "--" ]] || continue
     bip=$(kv "$bdump" bearer.properties.ip-type)
@@ -1560,7 +1560,7 @@ cmd_mode() {
 
   local -a args=(--set-allowed-modes="$allowed")
   [[ $preferred != none ]] && args+=(--set-preferred-mode="$preferred")
-  if mmcli -m "$idx" "${args[@]}" >/dev/null 2>&1; then
+  if timeout 45 mmcli -m "$idx" "${args[@]}" >/dev/null 2>&1; then
     echo "Radio mode set to $want."
     notify "Radio mode: $want"
   else
@@ -1589,10 +1589,10 @@ read_signal() {
   # Polling belongs to the modem object, so a reset or a slot switch loses it.
   # Read the rate back rather than remembering that it was set once: the modem
   # this armed may not be the modem being asked now.
-  out=$(mmcli -m "$idx" --signal-get 2>/dev/null) || return 0
+  out=$(timeout 10 mmcli -m "$idx" --signal-get 2>/dev/null) || return 0
   if [[ $out == *"refresh rate: 0 seconds"* ]]; then
-    mmcli -m "$idx" --signal-setup="${OMARCHY_CELLULAR_SIGNAL_RATE:-5}" >/dev/null 2>&1 || return 0
-    out=$(mmcli -m "$idx" --signal-get 2>/dev/null) || return 0
+    timeout 10 mmcli -m "$idx" --signal-setup="${OMARCHY_CELLULAR_SIGNAL_RATE:-5}" >/dev/null 2>&1 || return 0
+    out=$(timeout 10 mmcli -m "$idx" --signal-get 2>/dev/null) || return 0
   fi
 
   # mmcli emits one block per access technology, and a modem that scanned 5G
@@ -1664,12 +1664,12 @@ cmd_cells() {
   local raw
   raw=$(pkexec sh -c '
     dev=$1
-    qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-rf-band-info 2>/dev/null
+    timeout 30 qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-rf-band-info 2>/dev/null
     echo "===CELLS==="
-    qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-cell-location-info 2>/dev/null
+    timeout 30 qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-cell-location-info 2>/dev/null
     echo "===CA==="
     # LTE-only; on an NR camp it fails, and that is data, not an error.
-    qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-lte-cphy-ca-info 2>/dev/null
+    timeout 30 qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-lte-cphy-ca-info 2>/dev/null
     exit 0
   ' sh "$dev") || return 1
   [[ -n $raw ]] || {
@@ -2385,10 +2385,10 @@ esim_run() {
     shift 3
 
     modem_idx() {
-      mmcli -L 2>/dev/null | sed -n "s|.*/Modem/\([0-9]\{1,\}\).*|\1|p" | head -1
+      timeout 10 mmcli -L 2>/dev/null | sed -n "s|.*/Modem/\([0-9]\{1,\}\).*|\1|p" | head -1
     }
     slot_now() {
-      mmcli -m "$1" -K 2>/dev/null |
+      timeout 10 mmcli -m "$1" -K 2>/dev/null |
         sed -n "s/^[[:space:]]*modem\.generic\.primary-sim-slot[[:space:]]*:[[:space:]]*//p" |
         head -1
     }
@@ -2397,7 +2397,7 @@ esim_run() {
     [ -n "$idx" ] || exit 11
 
     if [ -n "$want" ] && [ "$(slot_now "$idx")" != "$want" ]; then
-      mmcli -m "$idx" --set-primary-sim-slot="$want" >/dev/null 2>&1 || exit 12
+      timeout 90 mmcli -m "$idx" --set-primary-sim-slot="$want" >/dev/null 2>&1 || exit 12
       # The switch re-enumerates the modem, so the index changes and the SIM
       # object arrives late. Wait for the modem, then for the slot to read
       # back, then for the card: MBIM answers before the card is usable.
@@ -2410,7 +2410,7 @@ esim_run() {
           # when there is a port to ask. Without one the slot read-back and a
           # SIM object are all ModemManager offers.
           if [ -z "$dev" ]; then
-            sim=$(mmcli -m "$idx" -K 2>/dev/null |
+            sim=$(timeout 10 mmcli -m "$idx" -K 2>/dev/null |
               sed -n "s/^[[:space:]]*modem\.generic\.sim[[:space:]]*:[[:space:]]*//p" | head -1)
             case $sim in */SIM/*) ok=1; break ;; esac
           elif mbimcli --device="$dev" --device-open-proxy \
@@ -2526,8 +2526,8 @@ sim_reread() {
   local idx
   idx=$(modem_index) || return 1
   [[ -n $idx ]] || return 1
-  mmcli -m "$idx" --disable >/dev/null 2>&1 || return 1
-  mmcli -m "$idx" --enable >/dev/null 2>&1 || return 1
+  timeout 45 mmcli -m "$idx" --disable >/dev/null 2>&1 || return 1
+  timeout 45 mmcli -m "$idx" --enable >/dev/null 2>&1 || return 1
   cache_flush
   modem_index_wait 30 >/dev/null
 }
