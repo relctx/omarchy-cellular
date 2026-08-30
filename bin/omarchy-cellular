@@ -13,6 +13,8 @@ NM_CONN="${OMARCHY_CELLULAR_CONN:-Omarchy Cellular}"
 # name; keep both pointing at the same place.
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cellular"
 STATE_DIR=$STATE
+# Card identifiers and usage accounting live here; nobody else's business.
+mkdir -p "$STATE_DIR" 2>/dev/null && chmod 700 "$STATE_DIR" 2>/dev/null
 # Pre-card-split accounting; still read for a card never seen since.
 USAGE_FILE="$STATE_DIR/usage"
 
