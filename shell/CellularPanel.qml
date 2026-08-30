@@ -388,6 +388,10 @@ Panel {
   property string browseProv: ""
   property var browseRows: []
 
+  // The settings rows run smaller than the kit default, in step with the
+  // rest of the panel.
+  readonly property int tuneRowHeight: Math.round(Style.font.body * 1.6)
+
   function tuneSave() {
     var cmds = []
     var drops = [tuneMetricDrop, tuneIpDrop, tuneDeviceDrop]
@@ -3760,9 +3764,9 @@ Column {
     Column {
       id: groupInner
       x: Style.space(7)
-      y: groupTitle.implicitHeight + Style.space(4)
+      y: groupTitle.implicitHeight + Style.space(3)
       width: parent.width - Style.space(14)
-      spacing: Style.space(5)
+      spacing: Style.space(4)
     }
   }
 
@@ -3795,6 +3799,7 @@ Column {
       anchors.right: parent.right
       width: Math.round(parent.width * 0.62)
       showLabel: false
+      rowHeight: root.tuneRowHeight
       foreground: root.barForeground
       fontFamily: root.fontFamily
       options: parent.options
@@ -3828,6 +3833,8 @@ Column {
       id: tuneInput
       anchors.right: parent.right
       width: Math.round(parent.width * 0.62)
+      font.pixelSize: Style.font.bodySmall
+      verticalPadding: Math.max(2, Math.round((root.tuneRowHeight - Style.font.bodySmall) / 2) - 2)
       horizontalAlignment: TextInput.AlignRight
       placeholderText: parent.hint
       foreground: root.barForeground
