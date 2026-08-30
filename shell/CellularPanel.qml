@@ -375,7 +375,6 @@ Panel {
   property var diagCells: []
   property var diagServing: ({})
   property bool diagLoading: false
-  property string codeReply: ""
 
   property var diagCa: []
 
@@ -914,16 +913,7 @@ Panel {
     }
   }
 
-  Process {
-    id: codeProc
-    stdout: StdioCollector { id: codeOut; waitForEnd: true }
-    stderr: StdioCollector { id: codeErr; waitForEnd: true }
-    onExited: function (code) {
-      var t = (codeOut.text || "").trim()
-      var e = (codeErr.text || "").trim()
-      root.codeReply = t !== "" ? t : e !== "" ? e : "No answer."
-    }
-  }
+
 
   Process { id: copyProc }
 
@@ -2280,32 +2270,7 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-          TextField {
-            id: carrierCodeField
-            width: parent.width
-            font.pixelSize: Style.font.caption
-            verticalPadding: Style.space(2)
-            placeholderText: "Carrier code — *121#, #3282…"
-            foreground: root.barForeground
-            onAccepted: {
-              if (text.trim() === "" || codeProc.running) return
-              root.codeReply = "Sending…"
-              codeProc.command = [root.cli, "code", text.trim()]
-              codeProc.running = true
-            }
-          }
 
-          Text {
-            textFormat: Text.PlainText
-            visible: root.codeReply !== ""
-            width: parent.width
-            wrapMode: Text.WordWrap
-            text: root.codeReply
-            color: root.barForeground
-            opacity: 0.75
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
         }
 
         // ---------- APN (behind its chip) ----------

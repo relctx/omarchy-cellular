@@ -101,7 +101,6 @@ omarchy-cellular apn list            APNs on the carrier's bearers
 omarchy-cellular pin ...             SIM lock: status, unlock, puk, on|off, change
 omarchy-cellular signal              every metric the modem reports, RSRQ included
 omarchy-cellular cells               carriers in use and every cell heard
-omarchy-cellular code '<*code#>'     carrier code in-band (USSD; dialed on CDMA)
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
 omarchy-cellular metered [yes|no]      whether this connection costs money

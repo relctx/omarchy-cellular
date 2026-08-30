@@ -1871,43 +1871,6 @@ cmd_sms() {
   esac
 }
 
-# One carrier code, sent in-band: USSD, which is how GSM-lineage networks
-# answer them. CDMA-lineage networks dial feature codes instead and reply by
-# SMS; that path is best effort through the voice interface.
-cmd_code() {
-  local code="${1:-}"
-  [[ -n $code ]] || {
-    echo "usage: omarchy-cellular code '<*code#>'   e.g. code '*121#'" >&2
-    return 2
-  }
-  [[ $code =~ ^[*#0-9]+$ ]] || {
-    echo "That does not look like a carrier code." >&2
-    return 2
-  }
-  local idx
-  idx=$(modem_index_wait) || {
-    echo "No modem detected." >&2
-    return 1
-  }
-  local out
-  if out=$(timeout 40 mmcli -m "$idx" --3gpp-ussd-initiate="$code" 2>&1 | grep -v WARNING) &&
-    [[ -n $out ]]; then
-    printf '%s\n' "$out"
-    return 0
-  fi
-  echo "USSD did not answer. CDMA-lineage carriers dial these instead; trying that." >&2
-  echo "Any reply arrives as a text message." >&2
-  mmcli -m "$idx" --voice-create-call="number=$code" >/dev/null 2>&1 || return 1
-  local cid
-  cid=$(mmcli -m "$idx" --voice-list-calls 2>/dev/null | grep -oP '/Call/\K[0-9]+' | tail -1)
-  [[ -n $cid ]] || return 1
-  mmcli -m "$idx" -o "$cid" --start >/dev/null 2>&1
-  sleep 6
-  mmcli -m "$idx" -o "$cid" --hangup >/dev/null 2>&1
-  mmcli -m "$idx" --voice-delete-call="$cid" >/dev/null 2>&1
-  echo "Dialed."
-}
-
 # One identity per line: every card this modem can be, flattened. Physical
 # slots come from ModemManager's slot objects, which answer for inactive
 # cards too; eSIM profiles come from the cache the last profile list wrote,
@@ -3459,7 +3422,6 @@ signal) cmd_signal ;;
 esim-session) cmd_esim_session ;;
 sims) cmd_sims ;;
 cells) cmd_cells ;;
-code) cmd_code "${2:-}" ;;
 sms) cmd_sms "${2:-}" "${3:-}" ;;
 use) cmd_use "${2:-}" ;;
 mode) cmd_mode "${2:-}" ;;
@@ -3511,7 +3473,6 @@ usage: omarchy-cellular <command>
   sim [<n>|physical|esim] [--force]  select a SIM slot; bare: show config
   signal              every metric the modem reports, RSRQ included
   cells               serving cell, band, width, and every neighbor heard
-  code '<*code#>'     send a carrier code in-band (USSD; dialed on CDMA)
   sms [delete <id>]   read or delete stored text messages
   pin ...             SIM lock: status, unlock, puk, on|off, change
   at '<command>'      send one AT command, print the reply (diagnostics)
