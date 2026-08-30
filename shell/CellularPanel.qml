@@ -2732,14 +2732,37 @@ Panel {
             font.letterSpacing: 1
           }
 
-          TunePills {
-            label: "METRIC"
+          Item {
+            width: parent.width
+            implicitHeight: metricDrop.implicitHeight
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "METRIC"
+              color: root.barForeground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+            }
+
             // RSRP against RSSI is the RAT's choice, not the user's; the
             // sticky auto logic is that pair.
-            options: [{ id: "auto", label: "RSSI/RSRP" }, { id: "snr", label: "SNR" },
-                      { id: "signal", label: "Sig%" }]
-            current: root.info.spark_metric || "auto"
-            tuneKey: "spark-metric"
+            Dropdown {
+              id: metricDrop
+              anchors.right: parent.right
+              width: Math.round(parent.width * 0.62)
+              showLabel: false
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              options: [{ value: "auto", label: "RSSI/RSRP" },
+                        { value: "snr", label: "SNR" },
+                        { value: "signal", label: "Signal quality" }]
+              value: root.info.spark_metric || "auto"
+              onChanged: function (v) { root.runAction([root.cli, "tune", "spark-metric", v]) }
+            }
           }
 
           TuneField {
