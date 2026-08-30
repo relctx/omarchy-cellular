@@ -2179,8 +2179,9 @@ migrate() {
     set_cfg SPARK_METRIC ""
     set_cfg STATS stats
   fi
-  # 2.0: the driver-probe cache was renamed lpac-driver.
-  rm -f "$STATE_DIR/lpac-mbim"
+  # 2.0: the driver-probe cache was renamed lpac-driver, and the 1.0.x
+  # signal-armed marker has no reader.
+  rm -f "$STATE_DIR/lpac-mbim" "$STATE_DIR/signal-armed"
   # A conf carried over from the omarchy-wwan era keeps its old header;
   # correct the name without touching any settings.
   sed -i '1s|^# Omarchy WWAN.*|# Omarchy Cellular configuration|' "$CONFIG" 2>/dev/null
