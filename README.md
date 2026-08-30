@@ -34,7 +34,7 @@ ln -sf ~/.config/omarchy/plugins/relctx.cellular/bin/omarchy-cellular ~/.local/b
 Omarchy 4.0 (quattro) or newer. The widget targets the Quickshell-based omarchy-shell.
 
 eSIM profile management needs lpac built with the driver matching the modem's
-control port — `mbim` normally, `qmi` for modems that expose only a QMI port.
+control port: `mbim` normally, `qmi` for modems that expose only a QMI port.
 The `lpac-git` package has both, the stock `lpac` package has neither:
 
 ```sh
@@ -43,8 +43,8 @@ omarchy pkg add zbar        # QR scan; codes can still be typed without it
 omarchy pkg add libqmi      # optional: qmicli, for `cells` diagnostics
 ```
 
-`lpac` talks to the eUICC over the modem's control port — MBIM or QMI, matching what
-the modem exposes — which ModemManager keeps open, so eSIM operations do not interrupt
+`lpac` talks to the eUICC over the modem's control port (MBIM or QMI, matching what
+the modem exposes), which ModemManager keeps open, so eSIM operations do not interrupt
 the connection. `omarchy-cellular doctor` reports
 what is installed.
 
@@ -56,7 +56,7 @@ Developed against a Lenovo ThinkPad X1 Carbon Gen 12 with a Quectel RM520N-GL (5
 MHI/PCIe). USB modems should work, but have not been tested.
 
 Two code paths depend on the hardware. Control-port discovery reads the captured
-modem's own port list — MBIM preferred, QMI honored — with a `/sys/class/wwan` scan
+modem's own port list, MBIM preferred, with a `/sys/class/wwan` scan
 only as the fallback while the modem object is absent. Control-port recovery after
 suspend re-authorizes the USB device to force a re-probe, and returns early on PCIe,
 where there is no `cdc-wdm` node.
@@ -74,52 +74,94 @@ The panel is event-driven: ModemManager and NetworkManager signals update it as 
 happen, and a SIM switch reports each stage instead of holding one spinner.
 
 - **Connect switch**, operator, technology, status.
+- **Active identity**: which card and which APN are active.
 - **Connection stats and chart**: signal metrics colored at their 3GPP thresholds,
   ping, packet loss, throughput, totals, IP. Click a value to copy it. A sparkline
-  charts RSSI/RSRP, SNR, or signal quality over a chosen window. The layout is
-  selectable: full stats, a condensed six-stat grid, a split chart-beside-stats view,
-  chart only, stats only, or hidden.
-- **Active identity**: which card, which APN, at a glance.
-- **Data usage**: per-card meter with the calendar's position ticked on the bar, the
-  counting start stamped, and cutoff as a switch.
+  charts RSSI/RSRP, SNR, or signal quality over a chosen window.
+- **Data usage**: a per-card meter. A tick marks where today falls in the billing
+  period, the counting start is stamped, and the cutoff is a switch.
 - **Radio mode**: auto, 5G, 4G, 3G.
-- **Management chips**: Device details, SIM cards, APN and carrier, cell diagnostics,
-  messages — one box open at a time, with Settings apart on the right.
-- **SIM cards**: every identity the modem can be — the physical card and each eSIM
-  profile — as tiles; one click switches, whatever that takes underneath. eSIM
-  management lists profiles by ICCID with rename, delete and install.
-- **Cell diagnostics**: read on demand — every carrier in use (primary and secondaries
-  with their widths, carrier aggregation totaled) and every cell the radio hears.
-- **Messages**: carrier texts read, notified on arrival, and deleted — most of what a
-  data SIM ever receives. The store is the modem's own memory.
-- **Settings**: grouped, staged behind Save. Display (the layout preset, chart metric,
-  chart period), Polling (the idle fallback poll), Network (IP type, route metric,
-  operator ID), Modem (which device the plugin drives). Everything writes to
-  `cellular.conf` through the `tune` verb — the form is a view of the file.
+- **Management chips**: device details, SIM cards, APN and carrier, cell diagnostics,
+  messages. One box opens at a time. Settings sits apart on the right.
 
 The bar widget's own settings (default poll interval, sparkline enable, message
 notifications) are in Omarchy's bar widget settings; a `tune` value overrides where
 both exist.
 
-eSIM operations run over MBIM with the connection up. One authorization covers a whole
-management session.
+<br clear="both">
+
+### SIM cards and eSIM profiles
+
+<img align="right" src="preview-esim.png" alt="eSIM profile management" width="320">
+
+Every card the modem can use appears as a tile: the physical card and each eSIM
+profile. One click switches; the CLI decides whether that means a slot switch, a
+profile enable, or both. eSIM management lists profiles by full ICCID with rename,
+delete, and install by activation code or on-screen QR scan, and shows the eUICC's
+free space. Operations run over the modem's control port with the connection up, and
+one authorization covers a whole management session.
+
+```sh
+omarchy-cellular sims                    # every card, one per line
+omarchy-cellular use 8985235...          # switch to that card
+omarchy-cellular profile list
+omarchy-cellular profile enable 8985235...
+omarchy-cellular profile download 'LPA:1$...'
+```
 
 <br clear="both">
 
-<table>
-<tr valign="top">
-<td width="50%"><img src="preview-esim.png" alt="eSIM profile management"><br>
-<sub>eSIM profiles by ICCID: enable, rename, delete, install by code or QR — with the eUICC's free space read from the chip.</sub></td>
-<td width="50%"><img src="preview-diagnostics.png" alt="Cell diagnostics"><br>
-<sub>Carriers in use with widths and aggregation totaled, then every cell the radio hears.</sub></td>
-</tr>
-<tr valign="top">
-<td><img src="preview-messages.png" alt="Messages"><br>
-<sub>Carrier texts, read and deleted in place.</sub></td>
-<td><img src="preview-settings.png" alt="Settings"><br>
-<sub>Settings, grouped and staged behind Save: display layout, chart, polling, network, modem.</sub></td>
-</tr>
-</table>
+### Cell diagnostics
+
+<img align="right" src="preview-diagnostics.png" alt="Cell diagnostics" width="320">
+
+Read on demand behind one authorization, never polled. The table lists every carrier
+in use (the primary and each activated secondary with its width, carrier aggregation
+totaled) and then every cell the radio hears, strongest first. Neighbors are reported
+for the current radio mode only.
+
+```sh
+omarchy-cellular cells                   # the same table, in the terminal
+omarchy-cellular signal                  # every metric the modem reports
+```
+
+<br clear="both">
+
+### Messages
+
+<img align="right" src="preview-messages.png" alt="Messages" width="320">
+
+Carrier texts are read, deleted, and announced as notifications when they arrive.
+Balance notices, activation confirmations, and roaming warnings are most of what a
+data SIM receives. The store is the modem's own memory, so it is shared by every
+card in the modem.
+
+```sh
+omarchy-cellular sms                     # read stored messages
+omarchy-cellular sms delete 3
+```
+
+<br clear="both">
+
+### Settings
+
+<img align="right" src="preview-settings.png" alt="Settings" width="320">
+
+Grouped, and staged: changes apply when Save is clicked. Display holds the layout
+preset (full stats, a condensed grid, a split chart-beside-stats view, chart only,
+stats only, or hidden), the chart metric, and the chart period. Polling holds the
+idle fallback poll. Network holds IP type, route metric, and operator ID. Modem
+selects which device the plugin drives on a machine with more than one. The form
+reads and writes `cellular.conf`; the `tune` verb is the same interface from the
+terminal.
+
+```sh
+omarchy-cellular tune stats compact      # the split chart view
+omarchy-cellular tune spark-metric snr
+omarchy-cellular tune interval 120
+```
+
+<br clear="both">
 
 ## Commands
 
@@ -216,7 +258,7 @@ Each card runs its own meter against its own plan, accumulated from the interfac
 counters into `~/.local/state/omarchy-cellular/usage.<iccid>`; a delta whose interval
 straddled a card switch credits the card that was active. Counters survive reboots,
 suspend and interface re-creation. At the limit, cellular disconnects with a
-notification; reconnecting by hand — or `limit cutoff off` — suppresses the cutoff
+notification; reconnecting by hand (or `limit cutoff off`) suppresses the cutoff
 until the period renews.
 
 The meter samples on panel updates, which the event feed drives; a cutoff can overshoot
@@ -285,7 +327,9 @@ rm -rf ~/.config/omarchy/cellular.d       # per-card settings, including any SIM
 rm -rf ~/.local/state/omarchy-cellular    # usage meters
 ```
 
-ModemManager and NetworkManager are left unmodified.
+Config and state live outside the plugin directory so they survive plugin updates
+and reinstalls; that is why they are separate steps here. ModemManager and
+NetworkManager are left unmodified.
 
 ## Notes
 
