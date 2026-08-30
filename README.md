@@ -40,12 +40,12 @@ The `lpac-git` package has both, the stock `lpac` package has neither:
 ```sh
 yay -S lpac-git
 omarchy pkg add zbar        # QR scan; codes can still be typed without it
-omarchy pkg add libqmi      # optional: qmicli, for `cells` diagnostics
 ```
 
 `lpac` talks to the eUICC over the modem's control port (MBIM or QMI, matching what
 the modem exposes), which ModemManager keeps open, so eSIM operations do not interrupt
-the connection. `omarchy-cellular doctor` reports
+the connection. `qmicli` and `mbimcli` ship with libqmi and libmbim, which
+ModemManager depends on, so the diagnostics need nothing extra. `omarchy-cellular doctor` reports
 what is installed.
 
 ## Hardware
