@@ -2191,10 +2191,13 @@ migrate() {
   # missing stamp with existing state is an upgrade from before the stamp
   # existed, not a first install.
   if [[ -n $last || -s $STATE_DIR/usage || -s $STATE_DIR/iccid || -d $CARD_DIR ]]; then
-    local note="Updated to $cur. Release notes: github.com/relctx/omarchy-cellular/releases"
+    # Critical so it stays until dismissed: it fires once and carries the
+    # one action an upgrade may need.
+    local note="What changed:"$'\n'"github.com/relctx/omarchy-cellular/releases"
     [[ $(esim_transport) == none ]] &&
-      note+=$'\n'"eSIM management now needs lpac with the mbim driver: yay -S lpac-git"
-    notify "$note"
+      note+=$'\n'"eSIM needs lpac-git:"$'\n'"yay -S lpac-git"
+    omarchy-notification-send -g "󰢾" -u critical "Cellular updated to $cur" "$note" 2>/dev/null ||
+      notify-send -u critical "Cellular updated to $cur" "$note" 2>/dev/null
   fi
   printf '%s\n' "$cur" >"$f"
 }
@@ -2537,8 +2540,7 @@ cmd_toggle() {
 # eSIM provisioning needs a Local Profile Assistant. The plugin system has no
 # way to declare a dependency, so check at the point of use.
 LPA_HINT="Install one with:  yay -S lpac-git
-The stock lpac package lacks the MBIM driver this plugin depends on.
-It is an AUR package, so it builds from source on your machine."
+The stock lpac package lacks the MBIM driver this plugin depends on."
 
 have_lpa() { command -v lpac >/dev/null; }
 

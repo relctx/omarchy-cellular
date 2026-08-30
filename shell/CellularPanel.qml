@@ -3457,7 +3457,7 @@ Column {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 text: root.profileError
-                  ? root.profileError + "  Try Refresh."
+                  ? root.profileError
                   : "No profiles installed on this eSIM."
                 color: root.dim
                 font.family: root.fontFamily
