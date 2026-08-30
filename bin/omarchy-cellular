@@ -243,7 +243,7 @@ modem_dump() {
     # noclobber plus O_EXCL: refuse to write through a symlink or an existing
     # file, so nothing can aim this at a path of its choosing.
     set -o noclobber
-    if ! (timeout 10 timeout 10 mmcli -m "$1" -K 2>/dev/null | head -c "$MODEM_DUMP_MAX" >"$f") 2>/dev/null; then
+    if ! (timeout 10 mmcli -m "$1" -K 2>/dev/null | head -c "$MODEM_DUMP_MAX" >"$f") 2>/dev/null; then
       set +o noclobber
       rm -f -- "$f"
       return 1
@@ -536,6 +536,8 @@ get_cfg() {
 
 set_cfg() {
   local key="$1" val="$2" dst="$CONFIG" f
+  # One key, one line: a newline smuggled in a value must not become a second.
+  val=${val//$'\n'/ }
   if card_key "$key" && f=$(card_file); then
     dst=$f
     [[ -f $dst ]] || { mkdir -p "$CARD_DIR" && chmod 700 "$CARD_DIR" && : >"$dst" && chmod 600 "$dst"; }
@@ -543,7 +545,11 @@ set_cfg() {
     ensure_cfg
   fi
   if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$dst" 2>/dev/null; then
-    sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key}=${val}|" "$dst"
+    # The value lands inside the sed replacement; its metacharacters are data.
+    local sv=${val//\\/\\\\}
+    sv=${sv//|/\\|}
+    sv=${sv//&/\\&}
+    sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key}=${sv}|" "$dst"
   else
     printf '%s=%s\n' "$key" "$val" >>"$dst"
   fi
@@ -866,7 +872,9 @@ add_usage_to() { # <iccid> <d_rx> <d_tx>
       esac
     done <"$f"
   fi
-  printf '%srx=%s\ntx=%s\n' "$rest" "$((rx + $2))" "$((tx + $3))" >"$f"
+  # Written whole then renamed: a run killed mid-write must not lose the
+  # accumulated counter.
+  printf '%srx=%s\ntx=%s\n' "$rest" "$((rx + $2))" "$((tx + $3))" >"$f.new" && mv "$f.new" "$f"
 }
 
 # Accumulate usage and enforce the limit. Sets USED_BYTES, LIMIT_BYTES,
@@ -2785,7 +2793,8 @@ profiles_render() {
     + "profile.\(.key).class=\((.value.profileClass // "") | flat)"
   ' <<<"$1" 2>/dev/null)
   [[ -n $out ]] || return 0
-  mkdir -p "$STATE_DIR" && printf '%s\n' "$out" >"$STATE_DIR/profiles.cache"
+  mkdir -p "$STATE_DIR" && printf '%s\n' "$out" >"$STATE_DIR/profiles.cache.new" &&
+    mv "$STATE_DIR/profiles.cache.new" "$STATE_DIR/profiles.cache"
   printf '%s\n' "$out"
 }
 
