@@ -342,6 +342,11 @@ ensure_radio() {
 
 # Prints the (possibly new) modem index. Both repairs need root, so they go
 # through pkexec; neither runs unless the control port has actually gone.
+# Escalation is ordered and consented: first an in-place USB re-probe of the
+# one affected device, then — only if that fails — a ModemManager restart,
+# each behind its own polkit prompt, never scheduled or polled. Without the
+# last rung, a resume that ate the control port ends at telling the user to
+# restart ModemManager by hand.
 ensure_control_port() {
   local idx="$1" dev
   has_control_port "$idx" && { printf '%s' "$idx"; return 0; }
