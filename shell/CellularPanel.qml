@@ -252,32 +252,35 @@ Panel {
     return m >= 1 ? m : 5
   }
   property double sparkGapStart: 0
-  function recordStrength(rsrp, rssi) {
+  function recordStrength(next) {
     var now = Date.now()
-    // Sticky metric: the modem alternates which strength field it reports
-    // sample to sample, and switching on every alternation wiped the
-    // history and blinked the chart. Stay on the current metric through
-    // gaps; a sample without it is skipped, and only a sustained absence
-    // (45s) switches to whatever is still reporting.
+    var vals = { RSRP: next.sig_rsrp, RSSI: next.sig_rssi,
+                 SNR: next.sig_snr, SIGNAL: next.signal }
     // A configured metric pins the chart to it; samples without it are
-    // gaps, never a reason to switch.
+    // gaps, never a reason to switch. Auto keeps the sticky RSRP/RSSI
+    // behavior: the modem alternates which strength field it reports, so
+    // only a sustained absence (45s) switches to what is still reporting.
     var forced = String(info.spark_metric || "auto").toLowerCase()
     var metric, raw
-    if (forced === "rsrp" || forced === "rssi") {
+    if (forced !== "auto" && vals[forced.toUpperCase()] !== undefined) {
       metric = forced.toUpperCase()
-      raw = metric === "RSRP" ? rsrp : rssi
+      raw = vals[metric]
       if (!raw) return
     } else {
-      metric = sparkMetric || (rsrp ? "RSRP" : rssi ? "RSSI" : "")
-      if (metric === "") return
-      raw = metric === "RSRP" ? rsrp : rssi
+      metric = sparkMetric || (vals.RSRP ? "RSRP" : vals.RSSI ? "RSSI" : "")
+      if (metric === "" || (metric !== "RSRP" && metric !== "RSSI")) {
+        metric = vals.RSRP ? "RSRP" : vals.RSSI ? "RSSI" : ""
+        if (metric === "") return
+        if (sparkMetric !== metric) rsrpHistory = []
+      }
+      raw = vals[metric]
       if (!raw) {
         if (sparkGapStart === 0) { sparkGapStart = now; return }
         if (now - sparkGapStart < 45000) return
-        var alt = rsrp ? "RSRP" : rssi ? "RSSI" : ""
+        var alt = vals.RSRP ? "RSRP" : vals.RSSI ? "RSSI" : ""
         if (alt === "") return
         metric = alt
-        raw = metric === "RSRP" ? rsrp : rssi
+        raw = vals[metric]
         rsrpHistory = []
       }
     }
@@ -300,6 +303,7 @@ Panel {
     if (mgmtView === "apn") carrierExpanded = true
     if (mgmtView === "tune") {
       tuneIntervalField.text = info.poll_interval || ""
+      tunePeriodField.text = info.spark_minutes || ""
       tuneMetricField.text = info.route_metric || ""
       tuneOperatorField.text = info.operator_id || ""
     }
@@ -700,7 +704,7 @@ Panel {
     if (freshDevs.length > 0 || devices.length === 0
         || next.state === "absent" || next.hw !== "yes")
       devices = freshDevs
-    recordStrength(next.sig_rsrp, next.sig_rssi)
+    recordStrength(next)
   }
 
   function updateStats(next) {
@@ -1396,7 +1400,9 @@ Panel {
                 if (h.length === 0) return ""
                 var sum = 0
                 for (var i = 0; i < h.length; i++) sum += h[i].v
-                return "avg " + (sum / h.length).toFixed(0) + " dBm"
+                var unit = root.sparkMetric === "SNR" ? " dB"
+                         : root.sparkMetric === "SIGNAL" ? "%" : " dBm"
+                return "avg " + (sum / h.length).toFixed(0) + unit
               }
               visible: root.mgmtView === ""
               color: root.barForeground
@@ -2716,19 +2722,33 @@ Panel {
             fontFamily: root.fontFamily
           }
 
+          Text {
+            textFormat: Text.PlainText
+            text: "SPARKLINE GRAPH"
+            color: root.barForeground
+            opacity: 0.45
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.letterSpacing: 1
+          }
+
           TunePills {
-            label: "SPARKLINE"
-            options: [{ id: "auto", label: "Auto" }, { id: "rsrp", label: "RSRP" }, { id: "rssi", label: "RSSI" }]
+            label: "METRIC"
+            options: [{ id: "auto", label: "Auto" }, { id: "rsrp", label: "RSRP" },
+                      { id: "rssi", label: "RSSI" }, { id: "snr", label: "SNR" },
+                      { id: "signal", label: "Sig%" }]
             current: root.info.spark_metric || "auto"
             tuneKey: "spark-metric"
           }
 
-          TunePills {
-            label: "WINDOW"
-            options: [{ id: "5", label: "5m" }, { id: "15", label: "15m" }, { id: "30", label: "30m" }]
-            current: String(root.sparkMinutes)
+          TuneField {
+            id: tunePeriodField
+            label: "PERIOD (MINUTES)"
+            hint: "5"
             tuneKey: "spark-minutes"
           }
+
+          Item { width: parent.width; height: Style.space(2) }
 
           TunePills {
             label: "IP TYPE"

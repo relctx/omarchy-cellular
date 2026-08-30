@@ -2169,7 +2169,7 @@ usage: omarchy-cellular tune <key> [value]
   ip-type        ipv4 | ipv6 | ipv4v6
   route-metric   default-route metric (blank for 700)
   operator-id    force MCC+MNC registration (blank for automatic)
-  spark-metric   auto | rsrp | rssi
+  spark-metric   auto | rsrp | rssi | snr | signal
   spark-minutes  sparkline window, minutes (1-180)
   interval       background poll seconds (10-3600; blank for the widget setting)
 EOF
@@ -2190,7 +2190,8 @@ EOF
     [[ -z $val || $val =~ ^[0-9]{5,6}$ ]] ||
       { echo "operator-id: MCC+MNC digits, or blank for automatic" >&2; return 2; } ;;
   spark-metric)
-    [[ $val =~ ^(auto|rsrp|rssi)$ ]] || { echo "spark-metric: auto, rsrp or rssi" >&2; return 2; } ;;
+    [[ $val =~ ^(auto|rsrp|rssi|snr|signal)$ ]] ||
+      { echo "spark-metric: auto, rsrp, rssi, snr or signal" >&2; return 2; } ;;
   spark-minutes)
     [[ $val =~ ^[0-9]+$ && $val -ge 1 && $val -le 180 ]] ||
       { echo "spark-minutes: 1-180" >&2; return 2; } ;;
