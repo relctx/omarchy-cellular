@@ -1355,14 +1355,13 @@ Panel {
           rowSpacing: Style.spacing.labelGap
           readonly property real cellW: (width - columnSpacing) / 2
 
-          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+          InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
           InfoPair {
             width: parent.cellW
             label: "Ping"
             value: root.formatPing(root.pingLatency)
             valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
           }
-          InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
           InfoPair {
             width: parent.cellW
             label: "Packet Loss"
@@ -1376,51 +1375,52 @@ Panel {
             value: root.roaming ? "Yes" : "No"
             valueColor: root.roaming ? root.urgent : root.barForeground
           }
+          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
         }
 
-        Row {
+        Grid {
           visible: root.connected && root.statsMode === "full"
           width: parent.width
-          spacing: Style.space(20)
+          columns: 2
+          columnSpacing: Style.space(20)
+          rowSpacing: Style.spacing.labelGap
+          readonly property real cellW: (width - columnSpacing) / 2
 
-          // Paired by row: Receiving/Sending and Downloaded/Uploaded belong
-          // together, and a missing field cannot shift the rows below it.
-          Column {
-            width: (parent.width - parent.spacing) / 2
-            spacing: Style.spacing.labelGap
-            InfoPair { label: "Operator"; value: root.info.operator || "—" }
-            InfoPair { label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
-            InfoPair { label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
-            InfoPair { label: "RSRQ"; value: root.info.sig_rsrq || "—"; valueColor: root.sigColor("rsrq", root.info.sig_rsrq) }
-            InfoPair {
-              label: "Ping"
-              value: root.formatPing(root.pingLatency)
-              valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
-            }
-            InfoPair { label: "Receiving"; value: root.hasTransferStats ? root.formatRate(root.downloadRate) : "--" }
-            InfoPair { label: "Downloaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.rx_bytes || "0")) : "--" }
-            InfoPair { label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+          // Reading order: signal and link quality, then identity, then
+          // transfer. The spacer keeps the transfer pairs on shared rows.
+          InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
+          InfoPair { width: parent.cellW; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
+          InfoPair { width: parent.cellW; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
+          InfoPair { width: parent.cellW; label: "RSRQ"; value: root.info.sig_rsrq || "—"; valueColor: root.sigColor("rsrq", root.info.sig_rsrq) }
+          InfoPair { width: parent.cellW; label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
+          InfoPair {
+            width: parent.cellW
+            label: "Ping"
+            value: root.formatPing(root.pingLatency)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
           }
+          InfoPair {
+            width: parent.cellW
+            label: "Packet Loss"
+            value: root.formatLoss(root.packetLoss)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
+          Item { width: parent.cellW; height: 1 }
 
-          Column {
-            width: (parent.width - parent.spacing) / 2
-            spacing: Style.spacing.labelGap
-            InfoPair { label: "Technology"; value: root.info.tech || "—" }
-            InfoPair {
-              label: "Roaming"
-              value: root.roaming ? "Yes" : "No"
-              valueColor: root.roaming ? root.urgent : root.barForeground
-            }
-            InfoPair { label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
-            InfoPair { label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
-            InfoPair {
-              label: "Packet Loss"
-              value: root.formatLoss(root.packetLoss)
-              valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
-            }
-            InfoPair { label: "Sending"; value: root.hasTransferStats ? root.formatRate(root.uploadRate) : "--" }
-            InfoPair { label: "Uploaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.tx_bytes || "0")) : "--" }
+          InfoPair { width: parent.cellW; label: "Technology"; value: root.info.tech || "—" }
+          InfoPair {
+            width: parent.cellW
+            label: "Roaming"
+            value: root.roaming ? "Yes" : "No"
+            valueColor: root.roaming ? root.urgent : root.barForeground
           }
+          InfoPair { width: parent.cellW; label: "Operator"; value: root.info.operator || "—" }
+          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+
+          InfoPair { width: parent.cellW; label: "Receiving"; value: root.hasTransferStats ? root.formatRate(root.downloadRate) : "--" }
+          InfoPair { width: parent.cellW; label: "Sending"; value: root.hasTransferStats ? root.formatRate(root.uploadRate) : "--" }
+          InfoPair { width: parent.cellW; label: "Downloaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.rx_bytes || "0")) : "--" }
+          InfoPair { width: parent.cellW; label: "Uploaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.tx_bytes || "0")) : "--" }
         }
 
           }
@@ -1597,20 +1597,19 @@ Panel {
               opacity: root.mgmtView === "" ? 0 : 1
               Behavior on opacity { NumberAnimation { duration: 150 } }
 
-              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
-              InfoPair {
-                width: sparkStats.cellW
-                size: Style.font.caption
-                label: "Ping"
-                value: root.formatPing(root.pingLatency)
-                valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
-              }
               InfoPair {
                 width: sparkStats.cellW
                 size: Style.font.caption
                 label: "Signal"
                 value: (root.info.signal || "0") + "%"
                 valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground
+              }
+              InfoPair {
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Ping"
+                value: root.formatPing(root.pingLatency)
+                valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
               }
               InfoPair {
                 width: sparkStats.cellW
@@ -1627,6 +1626,7 @@ Panel {
                 value: root.roaming ? "Yes" : "No"
                 valueColor: root.roaming ? root.urgent : root.barForeground
               }
+              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
             }
           }
         }
