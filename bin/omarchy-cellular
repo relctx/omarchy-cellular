@@ -2181,11 +2181,12 @@ usage: omarchy-cellular tune <key> [value]
   ip-type        ipv4 | ipv6 | ipv4v6
   route-metric   default-route metric (blank for 700)
   operator-id    force MCC+MNC registration (blank for automatic)
-  spark-metric   auto | snr | signal | off   (auto: RSRP/RSSI by RAT; off hides the graph)
+  spark-metric   auto | snr | signal   (auto: RSRP/RSSI, whichever the RAT reports)
   spark-minutes  sparkline window, minutes (1-180; blank for 5)
   interval       idle fallback poll, seconds (10-3600; blank for the widget
                  setting) — the event feed does the live updating
-  stats          full | minimal | hidden — the connection stats block
+  stats          full | minimal | compact | chart | stats | hidden — the
+                 resting midsection: stats grid, chart, the split, or none
 EOF
     return 2
     ;;
@@ -2204,8 +2205,8 @@ EOF
     [[ -z $val || $val =~ ^[0-9]{5,6}$ ]] ||
       { echo "operator-id: MCC+MNC digits, or blank for automatic" >&2; return 2; } ;;
   spark-metric)
-    [[ $val =~ ^(auto|snr|signal|off)$ ]] ||
-      { echo "spark-metric: auto (RSRP/RSSI by RAT), snr, signal or off" >&2; return 2; } ;;
+    [[ $val =~ ^(auto|snr|signal)$ ]] ||
+      { echo "spark-metric: auto (RSRP/RSSI by RAT), snr or signal" >&2; return 2; } ;;
   spark-minutes)
     [[ -z $val || ( $val =~ ^[0-9]+$ && $val -ge 1 && $val -le 180 ) ]] ||
       { echo "spark-minutes: 1-180, or blank for 5" >&2; return 2; } ;;
@@ -2213,8 +2214,8 @@ EOF
     [[ -z $val || ( $val =~ ^[0-9]+$ && $val -ge 10 && $val -le 3600 ) ]] ||
       { echo "interval: 10-3600 seconds, or blank for the widget setting" >&2; return 2; } ;;
   stats)
-    [[ $val =~ ^(full|minimal|hidden)$ ]] ||
-      { echo "stats: full, minimal or hidden" >&2; return 2; } ;;
+    [[ $val =~ ^(full|minimal|compact|chart|stats|hidden)$ ]] ||
+      { echo "stats: full, minimal, compact, chart, stats or hidden" >&2; return 2; } ;;
   esac
   set_cfg "$ck" "$val"
   ((apply)) && { nm_apply >/dev/null 2>&1 || true; }
@@ -2343,6 +2344,10 @@ cmd_panel() {
   printf 'ip_type=%s\n' "$(get_cfg IP_TYPE | grep . || echo ipv4v6)"
   printf 'route_metric=%s\n' "$(get_cfg ROUTE_METRIC)"
   printf 'operator_id=%s\n' "$(get_cfg OPERATOR_ID)"
+  if [[ $(get_cfg SPARK_METRIC) == off ]]; then
+    set_cfg SPARK_METRIC ""
+    set_cfg STATS stats
+  fi
   printf 'spark_metric=%s\n' "$(get_cfg SPARK_METRIC | grep . || echo auto)"
   printf 'spark_minutes=%s\n' "$(get_cfg SPARK_MINUTES)"
   printf 'poll_interval=%s\n' "$(get_cfg POLL_INTERVAL)"

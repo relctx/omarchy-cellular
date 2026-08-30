@@ -247,8 +247,12 @@ Panel {
   // share a line, so a metric change restarts the history.
   property var rsrpHistory: []
   property string sparkMetric: ""
-  readonly property string statsMode: info.stats || "full"
-  readonly property bool sparkOff: info.spark_metric === "off"
+  // Resting midsection preset: full, minimal, compact, chart, stats,
+  // hidden. Focus mode always shows the split (or the full-width strip on
+  // chartless presets), whatever the resting choice.
+  readonly property string displayMode: info.stats || "full"
+  readonly property bool chartless: displayMode === "stats" || displayMode === "hidden"
+  readonly property bool sparkSplit: mgmtView !== "" || displayMode === "compact"
   readonly property bool sparkPinned: info.spark_metric === "snr" || info.spark_metric === "signal"
   readonly property int sparkMinutes: {
     var m = parseInt(info.spark_minutes)
@@ -264,7 +268,6 @@ Panel {
     // behavior: the modem alternates which strength field it reports, so
     // only a sustained absence (45s) switches to what is still reporting.
     var forced = String(info.spark_metric || "auto").toLowerCase()
-    if (forced === "off") return
     var metric, raw
     if (forced !== "auto" && vals[forced.toUpperCase()] !== undefined) {
       metric = forced.toUpperCase()
@@ -1348,7 +1351,8 @@ Panel {
         // Label/value pairs in two columns; ping rows turn urgent as soon as a
         // probe is lost. The stats tunable picks full, minimal or hidden.
         Grid {
-          visible: root.connected && root.statsMode === "minimal"
+          visible: root.connected
+                   && (root.displayMode === "minimal" || root.displayMode === "stats")
           width: parent.width
           columns: 2
           columnSpacing: Style.space(20)
@@ -1379,7 +1383,7 @@ Panel {
         }
 
         Grid {
-          visible: root.connected && root.statsMode === "full"
+          visible: root.connected && root.displayMode === "full"
           width: parent.width
           columns: 2
           columnSpacing: Style.space(20)
@@ -1435,8 +1439,10 @@ Panel {
           // A pinned metric keeps the chart on screen from the moment it
           // is chosen — empty until samples arrive. Auto still waits for a
           // first metric so a modem with no signal data shows no chart.
+          // Chartless presets surface this section only in focus mode,
+          // where it is the full-width stat strip.
           visible: root.hwPresent && root.setting("sparkline", true)
-                   && (root.sparkOff ? root.mgmtView !== ""
+                   && (root.chartless ? root.mgmtView !== ""
                        : (root.sparkPinned || root.rsrpHistory.length >= 2
                           || root.sparkMetric !== ""))
           width: parent.width
@@ -1459,7 +1465,7 @@ Panel {
 
           Item {
             width: parent.width
-            visible: !root.sparkOff
+            visible: !root.chartless
             implicitHeight: sparkTitle.implicitHeight
 
             Text {
@@ -1489,7 +1495,7 @@ Panel {
                          : root.sparkMetric === "SIGNAL" ? "%" : " dBm"
                 return "avg " + (sum / h.length).toFixed(0) + unit
               }
-              visible: root.mgmtView === ""
+              visible: !root.sparkSplit
               color: root.barForeground
               opacity: 0.5
               font.family: root.fontFamily
@@ -1501,7 +1507,7 @@ Panel {
             width: parent.width
             // Tall enough for the focus-mode stat rows in both modes, so
             // entering focus changes only the chart's width, not its height.
-            height: root.sparkOff ? sparkStats.implicitHeight
+            height: root.chartless ? sparkStats.implicitHeight
                     : Math.max(Style.space(28), sparkStats.implicitHeight)
 
             // Focus mode narrows the chart to make room for the live numbers
@@ -1511,9 +1517,9 @@ Panel {
               anchors.left: parent.left
               anchors.top: parent.top
               anchors.bottom: parent.bottom
-              visible: !root.sparkOff
-              width: root.sparkOff ? 0
-                     : root.mgmtView === "" ? parent.width : Math.round(parent.width * 0.55)
+              visible: !root.chartless
+              width: root.chartless ? 0
+                     : root.sparkSplit ? Math.round(parent.width * 0.55) : parent.width
               Behavior on width { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
 
             // A subtle background and border mark the chart area, in theme
@@ -1584,16 +1590,16 @@ Panel {
             Grid {
               id: sparkStats
               anchors.left: sparkChart.right
-              anchors.leftMargin: root.sparkOff ? 0 : Style.space(6)
+              anchors.leftMargin: root.chartless ? 0 : Style.space(6)
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              columns: root.sparkOff ? 2 : 1
+              columns: root.chartless ? 2 : 1
               columnSpacing: Style.space(12)
               rowSpacing: Style.space(1)
-              readonly property real cellW: (width - (root.sparkOff ? columnSpacing : 0))
-                                            / (root.sparkOff ? 2 : 1)
-              visible: root.mgmtView !== "" || opacity > 0
-              opacity: root.mgmtView === "" ? 0 : 1
+              readonly property real cellW: (width - (root.chartless ? columnSpacing : 0))
+                                            / (root.chartless ? 2 : 1)
+              visible: root.sparkSplit || root.chartless || opacity > 0
+              opacity: (root.sparkSplit || root.chartless) ? 1 : 0
               Behavior on opacity { NumberAnimation { duration: 150 } }
 
               InfoPair {
@@ -2871,47 +2877,49 @@ Panel {
           }
 
           TuneGroup {
-            title: "STATS PANEL"
-
-            TuneField {
-              id: tuneIntervalField
-              label: "IDLE POLL (SEC)"
-              hint: "60"
-              tuneKey: "interval"
-            }
+            title: "DISPLAY"
 
             TuneDrop {
               id: tuneStatsDrop
-              label: "STATS"
-              options: [{ value: "full", label: "Full" },
-                        { value: "minimal", label: "Minimal" },
+              label: "LAYOUT"
+              options: [{ value: "full", label: "Chart + full stats" },
+                        { value: "minimal", label: "Chart + stats" },
+                        { value: "compact", label: "Split chart | stats" },
+                        { value: "chart", label: "Chart only" },
+                        { value: "stats", label: "Stats only" },
                         { value: "hidden", label: "Hidden" }]
-              current: root.statsMode
+              current: root.displayMode
               tuneKey: "stats"
             }
-          }
-
-          TuneGroup {
-            title: "SPARKLINE GRAPH"
 
             TuneDrop {
               id: tuneMetricDrop
-              label: "METRIC"
+              label: "CHART METRIC"
               // RSRP against RSSI is the RAT's choice, not the user's;
               // the sticky auto logic is that pair.
               options: [{ value: "auto", label: "RSSI/RSRP" },
                         { value: "snr", label: "SNR" },
-                        { value: "signal", label: "Signal quality" },
-                        { value: "off", label: "Off" }]
+                        { value: "signal", label: "Signal quality" }]
               current: root.info.spark_metric || "auto"
               tuneKey: "spark-metric"
             }
 
             TuneField {
               id: tunePeriodField
-              label: "PERIOD (MIN)"
+              label: "CHART PERIOD (MIN)"
               hint: "5"
               tuneKey: "spark-minutes"
+            }
+          }
+
+          TuneGroup {
+            title: "POLLING"
+
+            TuneField {
+              id: tuneIntervalField
+              label: "IDLE POLL (SEC)"
+              hint: "60"
+              tuneKey: "interval"
             }
           }
 
