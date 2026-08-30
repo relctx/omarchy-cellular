@@ -1261,6 +1261,7 @@ Panel {
         // RSRP over the last five minutes: a thin line that answers what the
         // instantaneous number cannot — is it degrading, and did moving help.
         Column {
+          id: sparkCol
           visible: root.hwPresent && root.rsrpHistory.length >= 2
                    && root.setting("sparkline", true)
           width: parent.width
@@ -1319,6 +1320,16 @@ Panel {
             width: parent.width
             height: Style.space(28)
 
+            // Focus mode narrows the chart to make room for the live numbers
+            // the folded stats grid would otherwise show.
+            Item {
+              id: sparkChart
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              width: root.mgmtView === "" ? parent.width : Math.round(parent.width * 0.55)
+              Behavior on width { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+
             // A quiet ground so the chart reads as a chart, in theme tones.
             Rectangle {
               anchors.fill: parent
@@ -1333,6 +1344,7 @@ Panel {
               id: rsrpSpark
               anchors.fill: parent
               anchors.margins: 3
+              onWidthChanged: requestPaint()
               property var pts: root.rsrpHistory
               // The theme's accent is the pen; everything else stays neutral.
               property color line: Color.accent
@@ -1346,7 +1358,7 @@ Panel {
                 // Autoscaled to the window: the deltas are the point, so
                 // whatever movement exists fills the height. Only a 1 dB
                 // guard against a degenerate flat window.
-                var lo = parent.parent.histLo, hi = parent.parent.histHi
+                var lo = sparkCol.histLo, hi = sparkCol.histHi
                 if (hi - lo < 1) { var mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5 }
                 var t0 = h[0].t, t1 = h[h.length - 1].t
                 var span = Math.max(1, t1 - t0)
@@ -1378,7 +1390,23 @@ Panel {
                 ctx.fill()
               }
             }
+            }
 
+            Column {
+              anchors.left: sparkChart.right
+              anchors.leftMargin: Style.space(6)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 0
+              visible: root.mgmtView !== "" || opacity > 0
+              opacity: root.mgmtView === "" ? 0 : 1
+              Behavior on opacity { NumberAnimation { duration: 150 } }
+
+              InfoPair { label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
+              InfoPair { label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
+              InfoPair { label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
+              InfoPair { label: "Tech"; value: root.info.tech || "—" }
+            }
           }
         }
 
