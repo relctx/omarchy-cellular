@@ -2213,6 +2213,7 @@ cmd_settings() {
   spark-metric) ck=SPARK_METRIC ;;
   spark-minutes) ck=SPARK_MINUTES ;;
   interval) ck=POLL_INTERVAL ;;
+  sms-notify) ck=SMS_NOTIFY ;;
   stats) ck=STATS ;;
   *)
     cat >&2 <<'EOF'
@@ -2223,8 +2224,9 @@ usage: omarchy-cellular settings <key> [value]
   operator-id    force MCC+MNC registration (blank for automatic)
   spark-metric   auto | snr | signal   (auto: RSRP/RSSI, whichever the RAT reports)
   spark-minutes  sparkline window, minutes (1-180; blank for 5)
-  interval       idle fallback poll, seconds (10-3600; blank for the widget
-                 setting) — the event feed does the live updating
+  interval       idle fallback poll, seconds (10-3600; blank for 60); the
+                 event feed does the live updating
+  sms-notify     yes | no — notify when a text message arrives
   stats          full | minimal | compact | chart | stats | hidden — the
                  resting midsection: stats grid, chart, the split, or none
 EOF
@@ -2253,6 +2255,9 @@ EOF
   interval)
     [[ -z $val || ( $val =~ ^[0-9]+$ && $val -ge 10 && $val -le 3600 ) ]] ||
       { echo "interval: 10-3600 seconds, or blank for the widget setting" >&2; return 2; } ;;
+  sms-notify)
+    [[ -z $val || $val =~ ^(yes|no)$ ]] ||
+      { echo "sms-notify: yes or no" >&2; return 2; } ;;
   stats)
     [[ $val =~ ^(full|minimal|compact|chart|stats|hidden)$ ]] ||
       { echo "stats: full, minimal, compact, chart, stats or hidden" >&2; return 2; } ;;
@@ -2388,6 +2393,7 @@ cmd_panel() {
   printf 'spark_metric=%s\n' "$(get_cfg SPARK_METRIC | grep . || echo auto)"
   printf 'spark_minutes=%s\n' "$(get_cfg SPARK_MINUTES)"
   printf 'poll_interval=%s\n' "$(get_cfg POLL_INTERVAL)"
+  printf 'sms_notify=%s\n' "$(get_cfg SMS_NOTIFY)"
   printf 'stats=%s\n' "$(get_cfg STATS | grep . || echo full)"
   printf 'prefer_cellular=%s\n' "$([[ $(get_cfg PREFER_CELLULAR) == yes ]] && echo yes || echo no)"
   printf 'route_via=%s\n' "$(route_via)"

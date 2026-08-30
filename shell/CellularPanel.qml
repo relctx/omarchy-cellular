@@ -319,6 +319,7 @@ Panel {
       tunePeriodField.text = info.spark_minutes || ""
       tuneMetricDrop.pending = ""
       tuneStatsDrop.pending = ""
+      tuneSmsDrop.pending = ""
       tuneIpDrop.pending = ""
       tuneDeviceDrop.pending = ""
       tuneMetricField.text = info.route_metric || ""
@@ -408,7 +409,7 @@ Panel {
 
   function tuneSave() {
     var cmds = []
-    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneDeviceDrop]
+    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneSmsDrop, tuneDeviceDrop]
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i]
       if (d.pending !== "" && d.pending !== d.current)
@@ -1006,8 +1007,11 @@ Panel {
           var t = Date.parse(m.time.replace(" ", "T"))
           fresh = !isNaN(t) && Date.now() - t < 600000
         }
+        var wantNotify = root.info.sms_notify !== undefined && root.info.sms_notify !== ""
+                         ? root.info.sms_notify === "yes"
+                         : root.setting("smsNotify", true)
         if (!first && !seen[key] && m.kind === "received" && fresh
-            && root.setting("smsNotify", true)) {
+            && wantNotify) {
           Quickshell.execDetached(["omarchy-notification-send", "-g", "󰍡",
             "Text from " + (m.number || "unknown"),
             (m.text || "").slice(0, 120)])
@@ -2913,13 +2917,23 @@ Panel {
           }
 
           TuneGroup {
-            title: "POLLING"
+            title: "PANEL"
 
             TuneField {
               id: tuneIntervalField
               label: "IDLE POLL (SEC)"
               hint: "60"
               tuneKey: "interval"
+            }
+
+            TuneDrop {
+              id: tuneSmsDrop
+              label: "SMS NOTIFICATIONS"
+              options: [{ value: "yes", label: "On" }, { value: "no", label: "Off" }]
+              current: (root.info.sms_notify || "") !== ""
+                       ? root.info.sms_notify
+                       : (root.setting("smsNotify", true) ? "yes" : "no")
+              tuneKey: "sms-notify"
             }
           }
 

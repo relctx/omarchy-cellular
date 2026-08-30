@@ -17,24 +17,6 @@
     "description": "Cellular signal with a control panel: connect, link stats, data cap, SIM slot, eSIM profiles, APN",
     "category": "Network",
     "allowMultiple": false,
-    "defaultSection": "right",
-    "defaults": {
-      "interval": 60,
-      "smsNotify": true
-    },
-    "schema": [
-      {
-        "key": "interval",
-        "type": "number",
-        "label": "Fallback refresh seconds (the panel's Idle poll setting overrides this)",
-        "defaultValue": 60
-      },
-      {
-        "key": "smsNotify",
-        "type": "boolean",
-        "label": "Notify when a text message arrives",
-        "defaultValue": true
-      }
-    ]
+    "defaultSection": "right"
   }
 }
