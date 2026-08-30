@@ -133,7 +133,10 @@ Username and password are applied for carriers that need them.
 APN, credentials, PIN, operator and the data plan belong to a card, not the machine.
 They live in `~/.config/omarchy/cellular.d/<iccid>.conf`, seeded from detect the first
 time a card is seen and applied automatically when the active card changes.
-`cellular.conf` keeps machine-wide settings.
+`cellular.conf` keeps machine-wide settings. On a machine with more than
+one modem, `DEVICE=` selects which one the plugin drives, by primary port
+name (`wwan1mbim0`) or IMEI; unset means the first modem ModemManager
+lists.
 
 ## Data limit
 

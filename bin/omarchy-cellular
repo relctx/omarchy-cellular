@@ -440,8 +440,24 @@ modem_index() {
     mkdir -p "$CACHE_DIR"
     # The bus answers this exactly; `mmcli -L` warns on stderr while a modem
     # is being rebuilt.
-    busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
-      sed -n 's|.*/Modem/\([0-9]\{1,\}\)$|\1|p' | head -1 >"$f"
+    local idxs want i d
+    idxs=$(busctl tree org.freedesktop.ModemManager1 --list 2>/dev/null |
+      sed -n 's|.*/Modem/\([0-9]\{1,\}\)$|\1|p')
+    # DEVICE in cellular.conf picks one modem on a multi-modem machine, by
+    # primary port name (wwan1mbim0) or IMEI. Unset means the first modem
+    # ModemManager lists, which on a one-modem machine is the only one.
+    want=$(get_cfg DEVICE)
+    if [[ -n $want ]]; then
+      for i in $idxs; do
+        d=$(modem_dump "$i") || continue
+        if [[ $(kv "$d" modem.generic.primary-port) == "$want" ]] ||
+          [[ $(kv "$d" modem.generic.equipment-identifier) == "$want" ]]; then
+          printf '%s\n' "$i" >"$f"
+          break
+        fi
+      done
+    fi
+    [[ -s $f ]] || head -1 <<<"$idxs" >"$f"
   }
   cat "$f" 2>/dev/null
 }
@@ -2291,19 +2307,24 @@ sysfs_dir_ok() {
 
 # The MBIM control port, found the same way as the AT one.
 mbim_port() {
-  local d n
+  # The captured modem's own port list answers first, so a second modem's
+  # port is never picked up. The sysfs scan is the fallback for when the
+  # modem object is absent (mid-switch, ModemManager restarting) — with two
+  # modems present it can name the wrong one, but nothing that reaches it
+  # then can act on the wrong device: the modem it belongs to is gone.
+  local idx n d
+  idx=$(modem_index)
+  if [[ -n $idx ]] && d=$(modem_dump "$idx"); then
+    n=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (mbim)$|\1|p' <<<"$d" | head -1)
+    [[ -n $n && -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  fi
+
   for d in /sys/class/wwan/*/; do
     [[ -r $d/type ]] || continue
     [[ $(cat "$d/type" 2>/dev/null) == MBIM ]] || continue
     n=$(basename "$d")
     [[ -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
   done
-
-  local idx
-  idx=$(modem_index) || return 1
-  [[ -n $idx ]] || return 1
-  n=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (mbim)$|\1|p' <<<"$(modem_dump "$idx")" | head -1)
-  [[ -n $n && -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
   return 1
 }
 
