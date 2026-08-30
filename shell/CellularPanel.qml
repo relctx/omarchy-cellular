@@ -1309,6 +1309,7 @@ Panel {
                 for (var i = 0; i < h.length; i++) sum += h[i].v
                 return "avg " + (sum / h.length).toFixed(0) + " dBm"
               }
+              visible: root.mgmtView === ""
               color: root.barForeground
               opacity: 0.5
               font.family: root.fontFamily
@@ -1318,7 +1319,11 @@ Panel {
 
           Item {
             width: parent.width
-            height: Style.space(28)
+            // Focus mode: tall enough for the stat rows, so the chart and the
+            // column share one bottom edge and the separator clears both.
+            height: root.mgmtView === "" ? Style.space(28)
+                    : Math.max(Style.space(28), sparkStats.implicitHeight)
+            Behavior on height { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
 
             // Focus mode narrows the chart to make room for the live numbers
             // the folded stats grid would otherwise show.
@@ -1393,19 +1398,20 @@ Panel {
             }
 
             Column {
+              id: sparkStats
               anchors.left: sparkChart.right
               anchors.leftMargin: Style.space(6)
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              spacing: 0
+              spacing: Style.space(1)
               visible: root.mgmtView !== "" || opacity > 0
               opacity: root.mgmtView === "" ? 0 : 1
               Behavior on opacity { NumberAnimation { duration: 150 } }
 
-              InfoPair { label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
-              InfoPair { label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
-              InfoPair { label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
-              InfoPair { label: "Tech"; value: root.info.tech || "—" }
+              InfoPair { size: Style.font.caption; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
+              InfoPair { size: Style.font.caption; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
+              InfoPair { size: Style.font.caption; label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
+              InfoPair { size: Style.font.caption; label: "Tech"; value: root.info.tech || "—" }
             }
           }
         }
@@ -3411,6 +3417,7 @@ Column {
     property string label: ""
     property string value: ""
     property string copyValue: ""
+    property int size: Style.font.bodySmall
     property color valueColor: root.barForeground
     readonly property bool copyable: copyValue !== ""
 
@@ -3424,7 +3431,7 @@ Column {
       color: root.barForeground
       opacity: 0.6
       font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: parent.size
     }
 
     // Right-aligned in whatever the label leaves, and elided: operator names
@@ -3439,7 +3446,7 @@ Column {
       color: parent.valueColor
       opacity: copyArea.containsMouse ? 0.7 : 1
       font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: parent.size
 
       MouseArea {
         id: copyArea
