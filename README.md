@@ -1,24 +1,18 @@
 # omarchy-cellular
 
-A cellular plugin for [Omarchy](https://omarchy.org/). It adds a bar widget with a
-control panel, and a CLI. NetworkManager and ModemManager do the work of managing the
-modem, read over the bus; lpac handles eSIM profiles and qmicli the deep diagnostics,
-each through its proxy on the modem's own control port.
+A Cellular (WWAN/Mobile Data) plugin for [Omarchy](https://omarchy.org/): a bar
+widget with a control panel and a CLI for LTE and 5G modems, SIM cards and eSIM
+profiles, APN and carrier settings, per-card data plans, text messages, and cell
+diagnostics. Wi-Fi-grade ease of use for the cellular modem in the tray.
 
-<table>
-<tr valign="top">
-<td width="50%"><img src="preview.png" alt="The Cellular panel at rest"><br>
-<sub>The panel: active card, connection stats, signal history, data meter, radio mode.</sub></td>
-<td width="50%"><img src="preview-sims.png" alt="SIM card selection"><br>
-<sub>Every card the modem holds — physical and eSIM profiles — switched with a click. Opening a section folds the rest away.</sub></td>
-</tr>
-<tr valign="top">
-<td><img src="preview-carriers.png" alt="The carrier database browser"><br>
-<sub>The carrier database inline: country, carrier, APN — applied on tap.</sub></td>
-<td><img src="preview-device.png" alt="Device details"><br>
-<sub>Device identity down to the control port. Identifiers are masked for screenshots and copied on click.</sub></td>
-</tr>
-</table>
+NetworkManager and ModemManager do the work of managing the modem, read over the bus;
+lpac handles eSIM profiles and qmicli the deep diagnostics, each through its proxy on
+the modem's own control port.
+
+<p align="center">
+<img src="preview.png" alt="The Cellular panel at rest" width="54%"><br>
+<sub>The panel: active card, connection stats, signal history, data meter, radio mode.</sub>
+</p>
 
 ## Install
 
@@ -56,6 +50,8 @@ what is installed.
 
 ## Hardware
 
+<img align="right" src="preview-device.png" alt="Device details" width="320">
+
 Developed against a Lenovo ThinkPad X1 Carbon Gen 12 with a Quectel RM520N-GL (5G,
 MHI/PCIe). USB modems should work, but have not been tested.
 
@@ -65,7 +61,11 @@ only as the fallback while the modem object is absent. Control-port recovery aft
 suspend re-authorizes the USB device to force a re-probe, and returns early on PCIe,
 where there is no `cdc-wdm` node.
 
+<br clear="both">
+
 ## Panel
+
+<img align="right" src="preview-sims.png" alt="SIM card selection" width="320">
 
 The bar icon opens the control panel. Right-click toggles cellular, middle-click
 refreshes.
@@ -103,6 +103,8 @@ both exist.
 
 eSIM operations run over MBIM with the connection up. One authorization covers a whole
 management session.
+
+<br clear="both">
 
 ## Commands
 
@@ -147,6 +149,8 @@ omarchy-cellular doctor              check the setup
 
 ## Carrier and APN
 
+<img align="right" src="preview-carriers.png" alt="The carrier database browser" width="320">
+
 APNs come from `mobile-broadband-provider-info`, the database NetworkManager's own mobile
 broadband wizard uses, covering 154 countries. MMS and WAP APNs are filtered out.
 
@@ -160,6 +164,8 @@ omarchy-cellular apply
 ```
 
 Username and password are applied for carriers that need them.
+
+<br clear="both">
 
 ## Per-card configuration
 
