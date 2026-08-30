@@ -63,6 +63,7 @@ Panel {
   property bool sessionReady: false
   property var sessionQueue: []
   property string sessionVerb: ""
+  property string sessionArg: ""
   property var sessionLines: []
 
   function sessionStart() {
@@ -100,6 +101,7 @@ Panel {
     var cmd = q.shift()
     root.sessionQueue = q
     root.sessionVerb = cmd.split(" ")[0]
+    root.sessionArg = cmd.indexOf(" ") > 0 ? cmd.substring(cmd.indexOf(" ") + 1) : ""
     root.sessionLines = []
     root.profilesLoading = true
     sessionProc.write(cmd + "\n")
@@ -130,6 +132,7 @@ Panel {
   }
 
   function sessionDone(verb, rc) {
+    var arg = root.sessionArg
     var lines = root.sessionLines
     root.sessionVerb = ""
     root.sessionLines = []
@@ -158,6 +161,11 @@ Panel {
     // main feed re-reads so the card list and identity follow immediately
     // instead of waiting out the poll interval.
     root.sessionSend("list")
+    // Enabling through the session switched the card but did none of the
+    // bookkeeping a switch needs; `settle` is that tail — config follows
+    // the card, NetworkManager reapplies, the connection comes back.
+    if (verb === "enable" && arg !== "")
+      root.runAction([root.cli, "settle", arg])
     root.opened ? root.refreshDetails() : root.refresh()
   }
 
@@ -749,6 +757,7 @@ Panel {
     if (verb === "sim") return "Switching SIM…"
     if (verb === "use") return "Switching SIM…"
     if (verb === "mode") return "Setting radio mode…"
+    if (verb === "settle") return "Reconnecting…"
     if (verb === "autoconnect") return "Saving…"
     if (verb === "profile") return "Updating the eSIM…"
     if (verb === "-c") return "Detecting carrier…"

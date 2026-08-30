@@ -2022,16 +2022,26 @@ cmd_use() {
   fi
   [[ -n $ESIM_LIST_JSON ]] && profiles_render "$ESIM_LIST_JSON" >/dev/null
 
+  card_settle "$want" "$was_active"
+}
+
+# The bookkeeping every card switch needs once the card itself has changed:
+# config follows the new card, NetworkManager gets its settings, and the
+# connection comes back up when wanted. Shared by `use` and by `settle`,
+# which the panel runs after switching through the eSIM session.
+card_settle() {
+  local want="$1" want_up="$2" eslot
   sim_follow_profile "$want"
   # The enable may have selected the eUICC's slot as part of the same
   # authorization; the configured slot follows the hardware.
+  eslot=$(esim_slot) || eslot=""
   [[ -n $eslot ]] && set_cfg SIM_SLOT "$eslot"
   cache_flush
   card_wait_resolvable
   nm_apply >/dev/null 2>&1 || true
   read_state
   notify "Now using ${SIM_OPERATOR:-the selected card}"
-  if ((was_active)); then
+  if ((want_up)); then
     if nm_up; then
       read_state
       notify "Connected to ${OPERATOR:-cellular network}"
@@ -2039,6 +2049,15 @@ cmd_use() {
       notify "Switched — reconnect pending"
     fi
   fi
+}
+
+cmd_settle() {
+  local want="${1:-}"
+  [[ $want =~ ^[0-9]{10,22}$ ]] || return 2
+  # Reconnect unless the user deliberately took the link down.
+  local up=1
+  [[ -f $STATE_DIR/user-off ]] && up=0
+  card_settle "$want" "$up"
 }
 
 # The event feed lands here on every change, which makes this the reaction# The event feed lands here on every change, which makes this the reaction
@@ -3448,6 +3467,7 @@ pin) cmd_pin "${2:-}" "${3:-}" "${4:-}" ;;
 signal) cmd_signal ;;
 esim-session) cmd_esim_session ;;
 sims) cmd_sims ;;
+settle) cmd_settle "${2:-}" ;;
 cells) cmd_cells ;;
 sms) cmd_sms "${2:-}" "${3:-}" ;;
 use) cmd_use "${2:-}" ;;
