@@ -251,6 +251,7 @@ Panel {
   // hidden. Focus mode always shows the split (or the full-width strip on
   // chartless presets), whatever the resting choice.
   readonly property string displayMode: info.stats || "full"
+  readonly property bool showUsage: (info.show_usage || "yes") !== "no"
   readonly property bool chartless: displayMode === "stats" || displayMode === "hidden"
   readonly property bool sparkSplit: mgmtView !== "" || displayMode === "compact"
   readonly property bool sparkPinned: info.spark_metric === "snr" || info.spark_metric === "signal"
@@ -320,6 +321,7 @@ Panel {
       tuneMetricDrop.pending = ""
       tuneStatsDrop.pending = ""
       tuneSmsDrop.pending = ""
+      tuneUsageDrop.pending = ""
       tuneIpDrop.pending = ""
       tuneDeviceDrop.pending = ""
       tuneMetricField.text = info.route_metric || ""
@@ -409,7 +411,7 @@ Panel {
 
   function tuneSave() {
     var cmds = []
-    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneSmsDrop, tuneDeviceDrop]
+    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneUsageDrop, tuneSmsDrop, tuneDeviceDrop]
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i]
       if (d.pending !== "" && d.pending !== d.current)
@@ -1717,9 +1719,10 @@ Panel {
         }
 
         // ---------- Data plan ----------
-        PanelSeparator { foreground: root.barForeground }
+        PanelSeparator { visible: root.showUsage; foreground: root.barForeground }
 
         Column {
+          visible: root.showUsage
           width: parent.width
           spacing: Style.space(10)
 
@@ -2924,6 +2927,14 @@ Panel {
               label: "IDLE POLL (SEC)"
               hint: "60"
               tuneKey: "interval"
+            }
+
+            TuneDrop {
+              id: tuneUsageDrop
+              label: "DATA USAGE"
+              options: [{ value: "yes", label: "Shown" }, { value: "no", label: "Hidden" }]
+              current: root.showUsage ? "yes" : "no"
+              tuneKey: "usage"
             }
 
             TuneDrop {

@@ -192,7 +192,7 @@ omarchy-cellular sms delete 3
 Grouped, and staged: changes apply when Save is clicked. Display holds the layout
 preset (full stats, a condensed grid, a split chart-beside-stats view, chart only,
 stats only, or hidden), the chart metric, and the chart period. Panel holds the
-idle fallback poll and SMS notifications. Network holds IP type, route metric,
+idle fallback poll, the data usage section, and SMS notifications. Network holds IP type, route metric,
 and operator ID. Modem
 selects which device the plugin drives on a machine with more than one. The form
 reads and writes `cellular.conf`; the `settings` verb is the same interface from the
@@ -233,7 +233,8 @@ omarchy-cellular devices             every modem present; * marks the one driven
 omarchy-cellular device <port|auto>  drive one modem, disable the rest
 omarchy-cellular settings <key> [value]  panel settings: stats (layout preset),
                                      spark-metric, spark-minutes, interval,
-                                     sms-notify, ip-type, route-metric, operator-id
+                                     sms-notify, usage, ip-type, route-metric,
+                                     operator-id
 omarchy-cellular at '<command>'      one AT command, manual diagnostics only
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
