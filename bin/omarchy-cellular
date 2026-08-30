@@ -2451,9 +2451,11 @@ esim_run() {
       # The switch re-enumerates the modem, so the index changes and the SIM
       # object arrives late. Wait for the modem, then for the slot to read
       # back, then for the card: MBIM answers before the card is usable.
+      # Nominal 90s: a slot switch on this class of modem routinely takes
+      # up to a minute before the card answers.
       ok=""
       i=0
-      while [ "$i" -lt 60 ]; do
+      while [ "$i" -lt 180 ]; do
         idx=$(modem_idx)
         if [ -n "$idx" ] && [ "$(slot_now "$idx")" = "$want" ]; then
           # MBIM answers before the card is usable, so ask the card itself
@@ -2507,7 +2509,7 @@ esim_run() {
     return 1
     ;;
   "$ESIM_E_READY")
-    echo "SIM slot $want did not become ready in thirty seconds." >&2
+    echo "SIM slot $want did not become ready in ninety seconds." >&2
     return 1
     ;;
   esac
