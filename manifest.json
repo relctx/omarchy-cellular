@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "relctx.cellular",
   "name": "Cellular",
-  "version": "1.0.1",
+  "version": "2.0",
   "author": "relctx",
   "license": "MIT",
-  "description": "Cellular (WWAN) indicator and controls for Omarchy",
+  "description": "Cellular (WWAN/Mobile Data) for Omarchy: LTE and 5G modems, SIM and eSIM, data plans, diagnostics",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Cellular",
-    "description": "Cellular signal with a control panel: connect, link stats, data cap, SIM slot, eSIM profiles, APN",
+    "description": "Bar widget and control panel for cellular: connect, signal stats and chart, SIM and eSIM switching, eSIM profile management, per-card data plans, carrier and APN, text messages, cell diagnostics",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right"

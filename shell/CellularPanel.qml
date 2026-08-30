@@ -12,6 +12,7 @@ Panel {
   ipcTarget: "relctx.cellular"
 
   property var info: ({})
+  property double absentSince: 0
   readonly property string wwanState: info.state || "absent"
   readonly property bool hwPresent: info.hw === "yes"
   readonly property bool installed: info.installed === "yes"
@@ -52,28 +53,148 @@ Panel {
   // The list as it was before an optimistic change, so a failed one can be put
   // back. Empty means nothing is pending.
   property var profilesUndo: []
+  // A scan runs detached, so the panel never hears whether it installed
+  // anything. Mark the list as possibly out of date instead of guessing.
+  property bool profilesStale: false
 
-  function loadProfiles() {
-    // Clicking again cancels a run waiting on the authorization prompt.
-    if (profilesLoading) {
-      profileProc.running = false
-      profilesLoading = false
-      profileError = "Cancelled."
+  // One authorization covers a whole eSIM session: the CLI keeps the elevated
+  // half open and feeds it commands, so every action after the first costs
+  // nothing. The session lives only while the profile list is on screen.
+  property bool sessionReady: false
+  property var sessionQueue: []
+  property string sessionVerb: ""
+  property string sessionArg: ""
+  property var sessionLines: []
+
+  function sessionStart() {
+    if (sessionProc.running) return
+    // The queue is left alone: the click that starts the session has
+    // usually already queued the command it wants run.
+    root.sessionReady = false
+    root.sessionVerb = ""
+    root.sessionLines = []
+    sessionProc.command = [root.cli, "esim-session"]
+    sessionProc.running = true
+  }
+
+  function sessionStop() {
+    if (!sessionProc.running) return
+    sessionProc.write("quit\n")
+    sessionProc.running = false
+    root.sessionReady = false
+    root.sessionVerb = ""
+    root.sessionQueue = []
+  }
+
+  function sessionSend(cmd) {
+    var q = root.sessionQueue.slice()
+    q.push(cmd)
+    root.sessionQueue = q
+    if (!sessionProc.running) { sessionStart(); return }
+    root.sessionPump()
+  }
+
+  function sessionPump() {
+    if (!root.sessionReady || root.sessionVerb !== "") return
+    if (root.sessionQueue.length === 0) return
+    var q = root.sessionQueue.slice()
+    var cmd = q.shift()
+    root.sessionQueue = q
+    root.sessionVerb = cmd.split(" ")[0]
+    root.sessionArg = cmd.indexOf(" ") > 0 ? cmd.substring(cmd.indexOf(" ") + 1) : ""
+    root.sessionLines = []
+    root.profilesLoading = true
+    // A mutation takes the eUICC several seconds; show a busy label in the
+    // status line, not only inside the Manage box.
+    if (root.sessionVerb === "enable") root.busyLabel = "Switching profile…"
+    else if (root.sessionVerb !== "list" && root.sessionVerb !== "chipinfo")
+      root.busyLabel = "Updating the eSIM…"
+    sessionProc.write(cmd + "\n")
+  }
+
+  function sessionLine(line) {
+    if (line.indexOf("euicc_free=") === 0) {
+      var b = parseFloat(line.substring(11))
+      root.euiccFree = isNaN(b) || b <= 0 ? "" : root.formatBytes(b) + " free"
       return
     }
-    profilesLoading = true
-    profileError = ""
-    profileProc.command = [root.cli, "profile", "list"]
-    profileProc.running = true
+    if (line === "session=ready") {
+      root.sessionReady = true
+      root.sessionPump()
+      return
+    }
+    if (line.indexOf("===END ") === 0) {
+      root.sessionDone(root.sessionVerb, line.replace("===END ", "").replace("===", ""))
+      return
+    }
+    if (line.indexOf("profile.") === 0) {
+      var l = root.sessionLines.slice()
+      l.push(line)
+      root.sessionLines = l
+    } else if (line.indexOf("error=") === 0) {
+      root.profileError = line.substring(6)
+    }
+  }
+
+  function sessionDone(verb, rc) {
+    var arg = root.sessionArg
+    var lines = root.sessionLines
+    root.sessionVerb = ""
+    root.sessionLines = []
+    root.profilesLoading = false
+    if (verb !== "list" && verb !== "chipinfo") root.busyLabel = ""
+
+    if (verb === "list") {
+      root.profiles = root.parseProfiles(lines.join("\n"))
+      root.profilesStale = false
+      if (root.profiles.length === 0 && root.profileError === "")
+        root.profileError = "Could not read the eSIM."
+      root.sessionPump()
+      return
+    }
+
+    if (rc !== "0") {
+      // The row was changed before the command ran, so put it back.
+      if (root.profilesUndo.length > 0) root.profiles = root.profilesUndo
+      root.profilesUndo = []
+      if (root.profileError === "") root.profileError = "That did not work."
+      root.sessionPump()
+      return
+    }
+
+    root.profilesUndo = []
+    // The change landed. The authoritative list costs nothing now, and the
+    // main feed re-reads so the card list and identity follow immediately
+    // instead of waiting out the poll interval.
+    root.sessionSend("list")
+    // Enabling through the session switches the card but skips the switch
+    // bookkeeping. `settle` runs it: config follows the card, NetworkManager
+    // reapplies its settings, and the connection is brought back up. If
+    // another action holds the slot right now, the settle waits for it.
+    if (verb === "enable" && arg !== ""
+        && !root.runAction([root.cli, "settle", arg]))
+      root.pendingSettle = arg
+    root.opened ? root.refreshDetails() : root.refresh()
+  }
+
+  function loadProfiles() {
+    root.profileError = ""
+    root.sessionSend("list")
   }
 
   // Button sizes to its content, so a long profile name pushes the action chips
   // off the panel.
-  function shortLabel(name, provider) {
+  // The last four ICCID digits, always. Issuers reuse one profileName across
+  // every profile they sell -- two Airalo plans both read "WEBBING · Airalo" --
+  // and the ICCID is the only thing that differs. Showing it always means the
+  // row you click is the row you meant, without renaming anything first.
+  function shortLabel(name, provider, iccid) {
     var n = name || "Unnamed"
-    if (n.length > 22) n = n.slice(0, 21) + "…"
-    if (!provider || provider === n) return n
-    return n + "  ·  " + (provider.length > 12 ? provider.slice(0, 11) + "…" : provider)
+    if (n.length > 18) n = n.slice(0, 17) + "…"
+    var tail = iccid ? String(iccid).slice(-4) : ""
+    if (provider && provider !== n)
+      n += "  ·  " + (provider.length > 10 ? provider.slice(0, 9) + "…" : provider)
+    return tail ? n + "  ·  " + tail : n
   }
 
   // Apply the change to the local list; reloading costs a second authorization
@@ -95,6 +216,133 @@ Panel {
 
   // The provider ModemManager reports for the card. No authorization, no cache.
   readonly property string simLabel: info.sim_operator || ""
+
+  // The published 3GPP quality tiers, as carrier field guides print them.
+  // A lookup table, not judgment: the label sits beside the number.
+  function sigTier(kind, raw) {
+    var v = parseFloat(raw)
+    if (isNaN(v)) return ""
+    if (kind === "rsrp")
+      return v >= -80 ? "excellent" : v >= -90 ? "good" : v >= -100 ? "fair"
+           : v >= -110 ? "poor" : "cell edge"
+    if (kind === "rsrq")
+      return v >= -10 ? "good" : v >= -15 ? "fair" : v >= -20 ? "poor" : "cell edge"
+    if (kind === "snr")
+      return v > 20 ? "excellent" : v >= 13 ? "good" : v >= 0 ? "fair" : "poor"
+    if (kind === "rssi")
+      return v >= -65 ? "excellent" : v >= -75 ? "good" : v >= -85 ? "fair"
+           : v >= -95 ? "poor" : "weak"
+    return ""
+  }
+  // Color carries the tier tables' judgment: red where the link is in
+  // trouble, plain otherwise, matching how the ping rows already behave.
+  function sigColor(kind, raw) {
+    var t = sigTier(kind, raw)
+    return (t === "poor" || t === "cell edge" || t === "weak") ? urgent : barForeground
+  }
+
+  // Strength history for the sparkline, fed by whatever updates the feed —
+  // events while closed, the stats cadence while open. Five minutes. RSRP
+  // when the modem reports it, RSSI when that is all there is; the two never
+  // share a line, so a metric change restarts the history.
+  property var rsrpHistory: []
+  property string sparkMetric: ""
+  // Resting midsection preset: full, minimal, compact, chart, stats,
+  // hidden. Focus mode always shows the split (or the full-width strip on
+  // chartless presets), whatever the resting choice.
+  readonly property string displayMode: info.stats || "full"
+  readonly property bool chartless: displayMode === "stats" || displayMode === "hidden"
+  readonly property bool sparkSplit: mgmtView !== "" || displayMode === "compact"
+  readonly property bool sparkPinned: info.spark_metric === "snr" || info.spark_metric === "signal"
+  readonly property int sparkMinutes: {
+    var m = parseInt(info.spark_minutes)
+    return m >= 1 ? m : 5
+  }
+  property double sparkGapStart: 0
+  function recordStrength(next) {
+    var now = Date.now()
+    var vals = { RSRP: next.sig_rsrp, RSSI: next.sig_rssi,
+                 SNR: next.sig_snr, SIGNAL: next.signal }
+    // A configured metric pins the chart to it; samples without it are
+    // gaps, never a reason to switch. Auto keeps the sticky RSRP/RSSI
+    // behavior: the modem alternates which strength field it reports, so
+    // only a sustained absence (45s) switches to what is still reporting.
+    var forced = String(info.spark_metric || "auto").toLowerCase()
+    var metric, raw
+    if (forced !== "auto" && vals[forced.toUpperCase()] !== undefined) {
+      metric = forced.toUpperCase()
+      // Adopt the pin at once, even before it has data: the chart retitles
+      // and empties instead of wearing the old metric's line.
+      if (sparkMetric !== metric) {
+        sparkMetric = metric
+        rsrpHistory = []
+      }
+      raw = vals[metric]
+      if (!raw) return
+    } else {
+      metric = sparkMetric || (vals.RSRP ? "RSRP" : vals.RSSI ? "RSSI" : "")
+      if (metric === "" || (metric !== "RSRP" && metric !== "RSSI")) {
+        metric = vals.RSRP ? "RSRP" : vals.RSSI ? "RSSI" : ""
+        if (metric === "") return
+        if (sparkMetric !== metric) rsrpHistory = []
+      }
+      raw = vals[metric]
+      if (!raw) {
+        if (sparkGapStart === 0) { sparkGapStart = now; return }
+        if (now - sparkGapStart < 45000) return
+        var alt = vals.RSRP ? "RSRP" : vals.RSSI ? "RSSI" : ""
+        if (alt === "") return
+        metric = alt
+        raw = vals[metric]
+        rsrpHistory = []
+      }
+    }
+    sparkGapStart = 0
+    var v = parseFloat(raw)
+    if (isNaN(v)) return
+    var h = sparkMetric === metric ? rsrpHistory.slice() : []
+    sparkMetric = metric
+    if (h.length > 0 && now - h[h.length - 1].t < 2000) return
+    h.push({ t: now, v: v })
+    while (h.length > 0 && now - h[0].t > sparkMinutes * 60000) h.shift()
+    rsrpHistory = h
+  }
+
+  // Which management box is open: "", "device", "sim" or "apn". One at a
+  // time; the chip row at the bottom drives it.
+  property string mgmtView: ""
+  function toggleMgmt(v) {
+    mgmtView = (mgmtView === v) ? "" : v
+    if (mgmtView === "apn") carrierExpanded = true
+    if (mgmtView === "tune") {
+      tuneIntervalField.text = info.poll_interval || ""
+      tunePeriodField.text = info.spark_minutes || ""
+      tuneMetricDrop.pending = ""
+      tuneStatsDrop.pending = ""
+      tuneSmsDrop.pending = ""
+      tuneIpDrop.pending = ""
+      tuneDeviceDrop.pending = ""
+      tuneMetricField.text = info.route_metric || ""
+      tuneOperatorField.text = info.operator_id || ""
+    }
+    if (mgmtView === "device") deviceExpanded = true
+    if (mgmtView !== "sim" && esimExpanded) {
+      esimExpanded = false
+      sessionStop()
+    }
+  }
+
+  // The active identity, named for the summary line.
+  readonly property string activeSimName: {
+    for (var i = 0; i < sims.length; i++) {
+      if (sims[i].active !== "yes") continue
+      var n = sims[i].name || sims[i].provider || ""
+      if (sims[i].provider && sims[i].provider !== sims[i].name)
+        n += "  ·  " + sims[i].provider
+      return n
+    }
+    return simLabel
+  }
 
   function seedLimitFields() {
     limitField.text = (info.limit && info.limit !== "off") ? info.limit : ""
@@ -126,6 +374,230 @@ Panel {
     return st === "enabled" || st === "1" || st === "true"
   }
 
+  // The card list, parsed from the same feed as everything else.
+  property var sims: []
+
+  // Every modem present. Settings shows a selector only when there is
+  // more than one.
+  property var devices: []
+
+  // Text messages: loaded when the box opens and when one arrives. The
+  // Messaging.Added signal rides the same event feed as everything else.
+  property string euiccFree: ""
+  property var smsList: []
+  property var smsSeen: null
+  property string smsOpen: ""
+  // A reload requested mid-read runs again when the read finishes: the
+  // trigger was an event this read may have started too early to see.
+  property bool smsReloadQueued: false
+  function loadSms() {
+    if (smsProc.running) { smsReloadQueued = true; return }
+    smsProc.running = true
+  }
+
+  // Carrier browser: the provider database, staged country -> carrier ->
+  // APN, all unprivileged reads of the shipped database.
+  property bool apnBrowse: false
+  property string browseCc: ""
+  property string browseCcName: ""
+  property string browseProv: ""
+  property var browseRows: []
+
+  // The settings rows run smaller than the kit default, in step with the
+  // rest of the panel.
+  readonly property int tuneRowHeight: Math.round(Style.font.body * 1.6)
+
+  function tuneSave() {
+    var cmds = []
+    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneSmsDrop, tuneDeviceDrop]
+    for (var i = 0; i < drops.length; i++) {
+      var d = drops[i]
+      if (d.pending !== "" && d.pending !== d.current)
+        cmds.push(d.verb === "settings" ? [cli, "settings", d.tuneKey, d.pending]
+                                    : [cli, d.verb, d.pending])
+      d.pending = ""
+    }
+    if (tunePeriodField.text.trim() !== String(info.spark_minutes || ""))
+      cmds.push([cli, "settings", "spark-minutes", tunePeriodField.text.trim()])
+    if (tuneMetricField.text.trim() !== String(info.route_metric || ""))
+      cmds.push([cli, "settings", "route-metric", tuneMetricField.text.trim()])
+    if (tuneOperatorField.text.trim() !== String(info.operator_id || ""))
+      cmds.push([cli, "settings", "operator-id", tuneOperatorField.text.trim()])
+    if (tuneIntervalField.text.trim() !== String(info.poll_interval || ""))
+      cmds.push([cli, "settings", "interval", tuneIntervalField.text.trim()])
+    if (cmds.length === 0) return
+    runAction(cmds[0], cmds.slice(1))
+  }
+
+  function browseLoad() {
+    browseRows = []
+    var cmd = [cli, "carrier", "list"]
+    if (browseCc !== "") cmd.push(browseCc)
+    if (browseProv !== "") cmd.push(browseProv)
+    browseProc.running = false
+    browseProc.command = cmd
+    browseProc.running = true
+  }
+
+  // Runs in root scope: a row click rebuilds the list model, which destroys
+  // the delegate whose handler is still executing — state changes made there
+  // are lost mid-statement. The delegate hands its row here and does nothing
+  // else.
+  function browsePick(m) {
+    browseFilter.text = ""
+    if (m.kind === "back") {
+      if (browseProv !== "") browseProv = ""
+      else { browseCc = ""; browseCcName = "" }
+      browseLoad()
+    } else if (m.kind === "country") {
+      browseCc = m.c0
+      browseCcName = m.label
+      browseLoad()
+    } else if (m.kind === "provider") {
+      browseProv = m.c0
+      browseLoad()
+    } else {
+      apnBrowse = false
+      runAction([cli, "carrier", "set", browseCc, browseProv, m.c0],
+                [cli, "apply"])
+    }
+  }
+
+  // Diagnostics: read on demand behind one authorization, never polled.
+  property var diagCells: []
+  property var diagServing: ({})
+  property bool diagLoading: false
+
+  property var diagCa: []
+
+  // One model for the table: the carriers actually in use lead it — primary
+  // then activated secondaries, each with its width — then everything else
+  // the radio hears. Measured cells merge with carriers by band and cell id.
+  readonly property var diagRows: {
+    var out = []
+    var claimed = {}
+    for (var i = 0; i < diagCells.length; i++) {
+      var c = diagCells[i]
+      var isServing = c.pci === diagServing.pci
+      var bandNum = String(c.band || "").replace(/^[bn]/, "")
+      var role = isServing ? "P" : ""
+      var w = isServing ? (diagServing.width || "") : ""
+      for (var k = 0; k < diagCa.length; k++) {
+        var a = diagCa[k]
+        if (a.band === bandNum && a.pci === c.pci) {
+          role = a.role
+          w = a.width || w
+          claimed[k] = true
+          break
+        }
+      }
+      out.push({
+        serving: isServing || role === "P",
+        role: role,
+        gen: String(c.band || "").charAt(0) === "n" ? "5G" : "LTE",
+        band: bandNum + (c.name && c.name !== "5G NR" ? " " + c.name : ""),
+        ch: (isServing ? (diagServing.channel || c.chan) : c.chan) || "—",
+        id: c.pci,
+        width: w,
+        rsrp: c.rsrp,
+        rssi: c.rssi || ""
+      })
+    }
+    // Carriers in use that no measured row matched still belong in the list.
+    for (k = 0; k < diagCa.length; k++) {
+      if (claimed[k]) continue
+      a = diagCa[k]
+      out.push({
+        serving: a.role === "P",
+        role: a.role,
+        gen: "LTE",
+        band: a.band,
+        ch: a.chan && a.chan !== "0" ? a.chan : "—",
+        id: a.pci,
+        width: a.width,
+        rsrp: "",
+        rssi: ""
+      })
+    }
+    out.sort(function (a, b) {
+      var r = function (x) { return x.role === "P" ? 0 : x.role === "S" ? 1 : 2 }
+      return r(a) - r(b)
+    })
+    // The camped cell is not always in the measured list; add a row for it
+    // when missing.
+    if (diagServing.band !== undefined && (out.length === 0 || !out[0].serving)) {
+      out.unshift({
+        serving: true,
+        gen: String(diagServing.band || "").indexOf("nr5g") === 0 ? "5G" : "LTE",
+        band: String(diagServing.band || "").replace(/^eutran-|^nr5g-|^b/, "")
+              + (diagServing.name ? " " + diagServing.name : ""),
+        ch: diagServing.channel || "—",
+        id: diagServing.pci || "—",
+        width: diagServing.width || "",
+        rsrp: "",
+        rssi: ""
+      })
+    }
+    return out
+  }
+
+  readonly property var diagServingCell: {
+    for (var i = 0; i < diagCells.length; i++)
+      if (diagCells[i].pci === diagServing.pci) return diagCells[i]
+    return null
+  }
+  readonly property var diagOtherCells: {
+    var out = []
+    for (var i = 0; i < diagCells.length; i++)
+      if (diagCells[i].pci !== diagServing.pci) out.push(diagCells[i])
+    return out
+  }
+
+  // Radio jargon translated: which generation, which numbered band, and the
+  // spectrum a person might recognize.
+  function bandLabel(band, name) {
+    var b = String(band || "")
+    var nrFreq = { 25: "1900 MHz", 41: "2.5 GHz", 66: "AWS", 71: "600 MHz",
+                   77: "3.7 GHz", 78: "3.5 GHz", 260: "mmWave", 261: "mmWave" }
+    var m = b.match(/^nr5g-(\d+)$|^n(\d+)$/)
+    if (m) {
+      var n = m[1] || m[2]
+      return "5G · band " + n + (nrFreq[n] ? " (" + nrFreq[n] + ")" : "")
+    }
+    m = b.match(/^eutran-(\d+)$|^b(\d+)$/)
+    if (m) {
+      var e = m[1] || m[2]
+      return "LTE · band " + e + (name ? " (" + name + ")" : "")
+    }
+    return b
+  }
+
+  function parseServing(text) {
+    var out = {}
+    var lines = (text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^serving\.([a-z]+)=(.*)$/)
+      if (m) out[m[1]] = m[2]
+    }
+    return out
+  }
+
+  function parseIndexed(text, prefix) {
+    var byIndex = {}
+    var lines = (text || "").split("\n")
+    var re = new RegExp("^" + prefix + "\\.(\\d+)\\.([a-z]+)=(.*)$")
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(re)
+      if (!m) continue
+      if (!byIndex[m[1]]) byIndex[m[1]] = {}
+      byIndex[m[1]][m[2]] = m[3]
+    }
+    var out = []
+    var keys = Object.keys(byIndex).sort(function (a, b) { return a - b })
+    for (var k = 0; k < keys.length; k++) out.push(byIndex[keys[k]])
+    return out
+  }
+
   function parseProfiles(text) {
     var byIndex = {}
     var lines = (text || "").split("\n")
@@ -142,6 +614,13 @@ Panel {
   // What the panel is doing right now; the hero otherwise shows the last polled
   // state, which during a connect reads as if nothing happened.
   property string busyLabel: ""
+  property string busyVerb: ""
+  // The last failed action's own words, shown where the chips are until the
+  // next action clears it. The CLI already notifies; this is for the panel
+  // that was open when it happened.
+  function notifyError(msg) {
+    Quickshell.execDetached(["omarchy-notification-send", "-u", "critical", "Cellular", msg])
+  }
   function maskId(v) {
     if (!v) return "—"
     return detailsRevealed ? v : v.slice(0, 4) + "•".repeat(Math.max(0, v.length - 4))
@@ -151,8 +630,8 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(barForeground, 1.4)
 
-  // The switch throws instantly on click; while the toggle is in flight it
-  // shows where we are going, not where we still are.
+  // The switch flips instantly on click; while the toggle is in flight it
+  // shows the target state, not the current one.
   property bool desired: false
   readonly property bool switchChecked: busy ? desired : connected
 
@@ -177,13 +656,36 @@ Panel {
   readonly property real usedBytes: parseFloat(info.used_bytes || "0")
   readonly property real limitBytes: parseFloat(info.limit_bytes || "0")
   readonly property bool limitAck: info.limit_ack === "1"
+
+  // Which slot carries the eUICC is the CLI's finding, not an assumption: it
+  // is the slot whose SIM reports an EID. The other one is the physical card.
+  readonly property string esimSlot: info.esim_slot || "2"
+  readonly property bool hasEsim: (info.esim_slot || "") !== ""
+  // The modem's report of the active slot outranks the configured one; the
+  // config can lag a switch made through a profile enable.
+  readonly property bool esimSelected: (info.active_slot || info.slot) === esimSlot
+  readonly property string physicalSlot: esimSlot === "1" ? "2" : "1"
+  function slotHasCard(slot) { return info["slot" + slot + "_sim"] !== "no" }
   readonly property real usedFraction: limitBytes > 0 ? Math.min(1, usedBytes / limitBytes) : 0
+  // Where "today" sits in the billing cycle. Usage left of this tick is
+  // under pace; right of it is burning ahead of the calendar.
+  readonly property real cycleFraction: {
+    var st = Date.parse(info.period_start || "")
+    var en = Date.parse(info.next_reset || "")
+    if (isNaN(st) || isNaN(en) || en <= st) return -1
+    return Math.min(1, Math.max(0, (Date.now() - st) / (en - st)))
+  }
   readonly property string nextResetLabel: {
     if (!info.next_reset) return ""
     var d = new Date(info.next_reset + "T00:00:00")
     if (isNaN(d.getTime())) return ""
     return "Resets " + Qt.formatDate(d, "MMM d")
   }
+  // When the meter began counting, distinct from when the period began.
+  // Shown as the CLI records it: a timestamp of the moment the reset
+  // control was used.
+  readonly property string startedLabel:
+    info.counting_since ? "Started " + info.counting_since : ""
 
   function capitalise(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : v }
 
@@ -196,7 +698,7 @@ Panel {
     // Prefer the network's stated reason; a modem that is genuinely still
     // looking reports none.
     case "searching": return info.reason ? capitalise(info.reason) : "Searching for network"
-    case "nosim": return info.active_slot === "2"
+    case "nosim": return info.active_slot === root.esimSlot
       ? "eSIM is empty — no profile"
       : "SIM slot " + (info.active_slot || "?") + " is empty"
     case "locked": return "SIM locked — PIN required"
@@ -223,8 +725,30 @@ Panel {
     // Keep the last known state across a transient empty read, so the widget
     // never blinks out while the CLI is briefly unavailable.
     if (Object.keys(next).length === 0) return
+    // Same policy for a modem that momentarily left the bus (ModemManager
+    // re-enumerates it during profile and slot operations): every field
+    // reads empty, not changed. Hold the last real state briefly; a modem
+    // that stays gone gets reported honestly.
+    if (next.state === "absent" && next.hw === "yes"
+        && info.state && info.state !== "absent" && info.state !== "disabled") {
+      if (absentSince === 0) absentSince = Date.now()
+      if (Date.now() - absentSince < 75000) return
+    }
+    absentSince = 0
     updateStats(next)
     info = next
+    // A poll that races modem re-enumeration reads the modem object before
+    // its SIM slots repopulate: zero cards, everything else healthy. Keep
+    // the tiles; a modem with genuinely no cards reports nosim or absent.
+    var freshSims = parseIndexed(raw, "sim")
+    if (freshSims.length > 0 || sims.length === 0
+        || next.state === "nosim" || next.state === "absent" || next.hw !== "yes")
+      sims = freshSims
+    var freshDevs = parseIndexed(raw, "dev")
+    if (freshDevs.length > 0 || devices.length === 0
+        || next.state === "absent" || next.hw !== "yes")
+      devices = freshDevs
+    recordStrength(next)
   }
 
   function updateStats(next) {
@@ -309,18 +833,36 @@ Panel {
     if (verb === "disconnect") return "Disconnecting…"
     if (verb === "toggle") return root.connected ? "Disconnecting…" : "Connecting…"
     if (verb === "sim") return "Switching SIM…"
+    if (verb === "use") return "Switching SIM…"
     if (verb === "mode") return "Setting radio mode…"
+    if (verb === "settle") return "Reconnecting…"
+    if (verb === "device") return "Switching modem…"
+    if (verb === "apply") return "Applying…"
+    if (verb === "carrier") return cmd[2] === "auto" ? "Detecting carrier…" : "Setting carrier…"
     if (verb === "autoconnect") return "Saving…"
+    if (verb === "roaming") return "Saving…"
+    if (verb === "settings") return "Saving…"
     if (verb === "profile") return "Updating the eSIM…"
     if (verb === "-c") return "Detecting carrier…"
     return "Working…"
   }
 
-  function runAction(cmd) {
-    if (actionProc.running) return
+  // Returns false when another action is already running, so callers that
+  // clear their own input can keep it instead of losing it.
+  property var actionFollow: []
+  property string pendingSettle: ""
+  // `follow` is one command or a list of commands, run in order after this
+  // one succeeds.
+  function runAction(cmd, follow) {
+    if (actionProc.running) return false
+    var q = follow || []
+    if (q.length > 0 && typeof q[0] === "string") q = [q]
+    root.actionFollow = q
     root.busyLabel = root.labelFor(cmd)
+    root.busyVerb = cmd[1] === "sh" ? "" : (cmd[1] || "")
     actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
     actionProc.running = true
+    return true
   }
 
   function toggleData() {
@@ -336,18 +878,22 @@ Panel {
     if (root.bar) root.bar.run(cmd)
   }
 
-  // Copy without closing the panel: you are usually reading the value you just
-  // copied. Masked fields copy what they are hiding, not the dots.
+  // Copy without closing the panel, since the copied value is usually still
+  // being read. Masked fields copy the hidden value, not the dots.
   function copyValue(v) {
     if (!v) return
-    copyProc.command = ["wl-copy", "--", v]
-    copyProc.running = true
+    Quickshell.execDetached(["wl-copy", "--", v])
     root.copied = v
     copiedTimer.restart()
   }
   property string copied: ""
 
-  onOpenedChanged: if (!opened) resetStats()
+  onOpenedChanged: if (!opened) {
+    resetStats()
+    // Close the elevated session when the panel closes.
+    root.esimExpanded = false
+    root.sessionStop()
+  }
 
   visible: hwPresent
   implicitWidth: hwPresent ? button.implicitWidth : 0
@@ -369,21 +915,148 @@ Panel {
 
   Process {
     id: actionProc
+    stdout: StdioCollector { id: actionOut; waitForEnd: true }
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function (code) {
+      var doneVerb = root.busyVerb
       root.busyLabel = ""
+      root.busyVerb = ""
       // The list is updated before the command runs, so a failure has to put
       // it back or the change appears to take and then revert.
       if (code !== 0 && root.profilesUndo.length > 0) {
         root.profiles = root.profilesUndo
         root.profileError = (actionErr.text || "").trim() || "That did not work."
+      } else if (code !== 0) {
+        root.notifyError((actionErr.text || "").trim().split("\n")[0]
+          || (doneVerb ? "The " + doneVerb + " command failed." : "That did not work."))
+      } else if (code === 0) {
+        // A profile command returns the refreshed list from inside the same
+        // authorization. When it does, it replaces the optimistic guess and
+        // no second prompt is needed.
+        var fresh = root.parseProfiles(actionOut.text || "")
+        if (fresh.length > 0) {
+          root.profiles = fresh
+          root.profilesStale = false
+        }
       }
       root.profilesUndo = []
+      // A finished sms action owns the authoritative re-read; reading during
+      // the delete catches the object mid-teardown.
+      if (doneVerb === "sms") root.loadSms()
+      // A queued follow-up runs as its own argv — never through a shell —
+      // and the refresh waits for the end of the chain.
+      var follow = root.actionFollow
+      root.actionFollow = []
+      if (code === 0 && follow.length > 0) {
+        root.runAction(follow[0], follow.slice(1))
+        return
+      }
+      if (root.pendingSettle !== "") {
+        var settleArg = root.pendingSettle
+        root.pendingSettle = ""
+        if (root.runAction([root.cli, "settle", settleArg])) return
+      }
       root.opened ? root.refreshDetails() : root.refresh()
     }
   }
 
-  Process { id: copyProc }
+  Process {
+    id: sessionProc
+    stdinEnabled: true
+    stdout: SplitParser { onRead: function (line) { root.sessionLine(line) } }
+    stderr: StdioCollector { id: sessionErr; waitForEnd: true }
+    onExited: function (code) {
+      root.sessionReady = false
+      if (root.sessionVerb !== "" && root.sessionVerb !== "list" && root.sessionVerb !== "chipinfo"
+          && !actionProc.running) root.busyLabel = ""
+      root.sessionVerb = ""
+      root.sessionQueue = []
+      root.profilesLoading = false
+      if (code !== 0 && root.esimExpanded) {
+        var e = (sessionErr.text || "").trim()
+        if (e !== "") root.profileError = e
+      }
+    }
+  }
+
+  Process {
+    id: smsProc
+    command: [root.cli, "sms", "feed"]
+    stdout: StdioCollector { id: smsOut; waitForEnd: true }
+    onExited: function (code) {
+      if (root.smsReloadQueued) {
+        root.smsReloadQueued = false
+        Qt.callLater(root.loadSms)
+      }
+      if (code !== 0) return
+      var list = root.parseIndexed(smsOut.text, "sms")
+      // Notify once per message we have never seen, received ones only.
+      // Keyed on content: paths renumber when the modem re-enumerates, and
+      // the backlog present at first read stays quiet.
+      var first = root.smsSeen === null
+      var seen = first ? {} : root.smsSeen
+      for (var i = 0; i < list.length; i++) {
+        var m = list[i]
+        var key = (m.number || "") + "|" + (m.time || "") + "|" + (m.text || "").slice(0, 40)
+        // Notify only for unseen, received, recent messages: a modem
+        // re-enumeration replays Added for the whole store, and a partial
+        // read during the churn can make old messages look new, so the age
+        // check is the backstop.
+        var fresh = false
+        if (m.time) {
+          var t = Date.parse(m.time.replace(" ", "T"))
+          fresh = !isNaN(t) && Date.now() - t < 600000
+        }
+        var wantNotify = root.info.sms_notify !== undefined && root.info.sms_notify !== ""
+                         ? root.info.sms_notify === "yes"
+                         : root.setting("smsNotify", true)
+        if (!first && !seen[key] && m.kind === "received" && fresh
+            && wantNotify) {
+          Quickshell.execDetached(["omarchy-notification-send", "-g", "󰍡",
+            "Text from " + (m.number || "unknown"),
+            (m.text || "").slice(0, 120)])
+        }
+        seen[key] = true
+      }
+      root.smsSeen = seen
+      root.smsList = list
+    }
+  }
+
+  Process {
+    id: browseProc
+    stdout: StdioCollector { id: browseOut; waitForEnd: true }
+    onExited: function (code) {
+      if (code !== 0) return
+      var out = []
+      var lines = (browseOut.text || "").split("\n")
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i] === "") continue
+        var c = lines[i].split("\t")
+        out.push({ c0: c[0] || "", c1: c[1] || "", c2: c[2] || "", c3: c[3] || "" })
+      }
+      root.browseRows = out
+    }
+  }
+
+  Process {
+    id: diagProc
+    command: [root.cli, "cells"]
+    stdout: StdioCollector { id: diagOut; waitForEnd: true }
+    stderr: StdioCollector { id: diagErr; waitForEnd: true }
+    onExited: function (code) {
+      root.diagLoading = false
+      if (code === 0) {
+        root.diagServing = root.parseServing(diagOut.text)
+        root.diagCells = root.parseIndexed(diagOut.text, "cell")
+        root.diagCa = root.parseIndexed(diagOut.text, "ca")
+      } else {
+        root.notifyError((diagErr.text || "").trim().split("\n")[0] || "Could not read the cells.")
+      }
+    }
+  }
+
+
 
   Process {
     id: profileProc
@@ -405,9 +1078,82 @@ Panel {
     onTriggered: root.copied = ""
   }
 
-  // Background poll for the bar icon; the open panel has its own cadence.
+  // ------------------------------------------------------------ event feed
+  // ModemManager and NetworkManager broadcast every state change as a D-Bus
+  // signal, and gdbus monitor subscribes with ordinary match rules -- no
+  // privilege, unlike busctl's root-only monitor mode. Each signal schedules
+  // one debounced refresh, so a burst (a profile enable emits a dozen) costs
+  // one CLI run. Polling below survives only as a slow fallback.
+  function busEvent(line) {
+    // Non-signal chatter: the two header lines, name-owner notices.
+    if (line.length === 0 || line[0] !== "/") return
+
+    // A SIM switch takes the better part of a minute, almost all of it the
+    // modem's own re-enumeration. The stages pass through here anyway;
+    // narrate them instead of holding one label over the whole wait.
+    if ((busyVerb === "sim" || busyVerb === "use") && line.indexOf("/Modem") !== -1) {
+      if (line.indexOf("InterfacesRemoved") !== -1)
+        busyLabel = "Switching SIM — modem restarting…"
+      else if (line.indexOf("InterfacesAdded") !== -1)
+        busyLabel = "Switching SIM — modem initializing…"
+      else if (line.indexOf("{'State': <8>}") !== -1)
+        busyLabel = "Switching SIM — registered, connecting…"
+      else if (line.indexOf("{'State': <11>}") !== -1)
+        busyLabel = "Switching SIM — connected"
+    }
+    // Signal-strength samples arrive every few seconds while polling is
+    // armed. They only matter when the panel is open; refreshing the bar
+    // for each would out-poll the polling this feed replaces.
+    if (line.indexOf(".Signal',") !== -1 || line.indexOf("SignalQuality") !== -1) {
+      if (root.opened) eventDebounce.restart()
+      return
+    }
+    if (line.indexOf(".Messaging.Added") !== -1) loadSms()
+    eventDebounce.restart()
+  }
+
   Timer {
-    interval: Math.max(2, root.setting("interval", 10)) * 1000
+    id: eventDebounce
+    interval: 300
+    onTriggered: root.opened ? root.refreshDetails() : root.refresh()
+  }
+
+  // component MonitorProc is not possible for Process; two literal blocks.
+  Process {
+    id: mmMonitor
+    command: ["gdbus", "monitor", "-y", "-d", "org.freedesktop.ModemManager1"]
+    running: true
+    stdout: SplitParser { onRead: function (line) { root.busEvent(line) } }
+    onExited: monitorRestart.restart()
+  }
+
+  Process {
+    id: nmMonitor
+    command: ["gdbus", "monitor", "-y", "-d", "org.freedesktop.NetworkManager"]
+    running: true
+    stdout: SplitParser { onRead: function (line) { root.busEvent(line) } }
+    onExited: monitorRestart.restart()
+  }
+
+  // A monitor that died missed events; resync fully when it returns.
+  Timer {
+    id: monitorRestart
+    interval: 2000
+    onTriggered: {
+      if (!mmMonitor.running) mmMonitor.running = true
+      if (!nmMonitor.running) nmMonitor.running = true
+      root.opened ? root.refreshDetails() : root.refresh()
+    }
+  }
+
+  // Fallback only: the event feed above does the real work, and this catches
+  // whatever a dead monitor or a missed signal left behind. It is also the
+  // usage meter's heartbeat, so it stays regular rather than rare.
+  Timer {
+    interval: {
+      var p = parseInt(root.info.poll_interval)
+      return (p >= 10 ? p : Math.max(30, root.setting("interval", 60))) * 1000
+    }
     running: !root.opened
     repeat: true
     triggeredOnStart: true
@@ -491,53 +1237,425 @@ Panel {
           }
         }
 
-        // ---------- Connection stats ----------
-        // Label/value pairs in two columns; ping rows turn urgent as soon as a
-        // probe is lost.
-        Row {
-          visible: root.connected
-          width: parent.width
-          spacing: Style.space(20)
+        // ---------- Active identity ----------
+        PanelSeparator { foreground: root.barForeground }
 
-          // Paired by row: Receiving/Sending and Downloaded/Uploaded belong
-          // together, and a missing field cannot shift the rows below it.
-          Column {
-            width: (parent.width - parent.spacing) / 2
-            spacing: Style.spacing.labelGap
-            InfoPair { label: "Operator"; value: root.info.operator || "—" }
-            InfoPair { label: "Signal"; value: (root.info.signal || "0") + "%" }
-            InfoPair { label: "RSSI"; value: root.info.sig_rssi || "—" }
-            InfoPair { label: "RSRQ"; value: root.info.sig_rsrq || "—" }
-            InfoPair {
-              label: "Ping"
-              value: root.formatPing(root.pingLatency)
-              valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
-            }
-            InfoPair { label: "Receiving"; value: root.hasTransferStats ? root.formatRate(root.downloadRate) : "--" }
-            InfoPair { label: "Downloaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.rx_bytes || "0")) : "--" }
-            InfoPair { label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+        // The active identity, presented like the card it is: glyph, name,
+        // ICCID tail, and the APN it rides on.
+        Item {
+          width: parent.width
+          implicitHeight: idCol.implicitHeight
+
+          readonly property var activeSim: {
+            for (var i = 0; i < root.sims.length; i++)
+              if (root.sims[i].active === "yes") return root.sims[i]
+            return null
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            id: idGlyph
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: parent.activeSim && parent.activeSim.kind === "esim" ? "󱤓" : "󰒧"
+            color: root.barForeground
+            opacity: 0.8
+            font.family: root.fontFamily
+            font.pixelSize: Math.round(Style.font.body * 1.6)
           }
 
           Column {
-            width: (parent.width - parent.spacing) / 2
-            spacing: Style.spacing.labelGap
-            InfoPair { label: "Technology"; value: root.info.tech || "—" }
-            InfoPair {
-              label: "Roaming"
-              value: root.roaming ? "Yes" : "No"
-              valueColor: root.roaming ? root.urgent : root.barForeground
+            id: idCol
+            anchors.left: idGlyph.right
+            anchors.leftMargin: Style.space(8)
+            anchors.right: idTail.left
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              elide: Text.ElideRight
+              text: {
+                var a = idCol.parent.activeSim
+                return (a && (a.provider || a.name)) || root.simLabel || "No SIM"
+              }
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.weight: Font.DemiBold
             }
-            InfoPair { label: "RSRP"; value: root.info.sig_rsrp || "—" }
-            InfoPair { label: "SNR"; value: root.info.sig_snr || "—" }
-            InfoPair {
-              label: "Packet Loss"
-              value: root.formatLoss(root.packetLoss)
-              valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              elide: Text.ElideRight
+              text: "APN  " + (root.info.apn || "automatic")
+              color: root.barForeground
+              opacity: 0.55
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
-            InfoPair { label: "Sending"; value: root.hasTransferStats ? root.formatRate(root.uploadRate) : "--" }
-            InfoPair { label: "Uploaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.tx_bytes || "0")) : "--" }
+          }
+
+          Column {
+            id: idTail
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              visible: text !== ""
+              text: {
+                var a = idTail.parent.activeSim
+                return a && a.provider && a.name && a.provider !== a.name ? a.name : ""
+              }
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              text: idTail.parent.activeSim
+                    ? "····" + String(idTail.parent.activeSim.iccid || "").slice(-4) : ""
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
           }
         }
+
+        // Focus mode: opening a management box folds the midsection away,
+        // leaving the hero and identity as the basic strip with the chips
+        // risen beneath them. Closing unfolds it. Pure height animation; the
+        // sections inside are untouched.
+        Item {
+          clip: true
+          width: parent.width
+          height: root.mgmtView === "" ? midFoldA.implicitHeight : 0
+          opacity: root.mgmtView === "" ? 1 : 0
+          Behavior on height { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+          Behavior on opacity { NumberAnimation { duration: 150 } }
+
+          Column {
+            id: midFoldA
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            spacing: Style.space(14)
+
+        // ---------- Connection stats ----------
+        // Label/value pairs in two columns; ping rows turn urgent as soon as a
+        // probe is lost. The stats tunable picks full, minimal or hidden.
+        Grid {
+          visible: root.connected
+                   && (root.displayMode === "minimal" || root.displayMode === "stats")
+          width: parent.width
+          columns: 2
+          columnSpacing: Style.space(20)
+          rowSpacing: Style.spacing.labelGap
+          readonly property real cellW: (width - columnSpacing) / 2
+
+          InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
+          InfoPair {
+            width: parent.cellW
+            label: "Ping"
+            value: root.formatPing(root.pingLatency)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
+          InfoPair {
+            width: parent.cellW
+            label: "Packet Loss"
+            value: root.formatLoss(root.packetLoss)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
+          InfoPair { width: parent.cellW; label: "Tech"; value: root.info.tech || "—" }
+          InfoPair {
+            width: parent.cellW
+            label: "Roaming"
+            value: root.roaming ? "Yes" : "No"
+            valueColor: root.roaming ? root.urgent : root.barForeground
+          }
+          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+        }
+
+        Grid {
+          visible: root.connected && root.displayMode === "full"
+          width: parent.width
+          columns: 2
+          columnSpacing: Style.space(20)
+          rowSpacing: Style.spacing.labelGap
+          readonly property real cellW: (width - columnSpacing) / 2
+
+          // Reading order: signal and link quality, then identity, then
+          // transfer. Sixteen cells, so the transfer pairs share rows.
+          InfoPair { width: parent.cellW; label: "Signal"; value: (root.info.signal || "0") + "%"; valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground }
+          InfoPair { width: parent.cellW; label: "RSRP"; value: root.info.sig_rsrp || "—"; valueColor: root.sigColor("rsrp", root.info.sig_rsrp) }
+          InfoPair { width: parent.cellW; label: "RSSI"; value: root.info.sig_rssi || "—"; valueColor: root.sigColor("rssi", root.info.sig_rssi) }
+          InfoPair { width: parent.cellW; label: "RSRQ"; value: root.info.sig_rsrq || "—"; valueColor: root.sigColor("rsrq", root.info.sig_rsrq) }
+          InfoPair { width: parent.cellW; label: "SNR"; value: root.info.sig_snr || "—"; valueColor: root.sigColor("snr", root.info.sig_snr) }
+          InfoPair {
+            width: parent.cellW
+            label: "Ping"
+            value: root.formatPing(root.pingLatency)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
+          InfoPair {
+            width: parent.cellW
+            label: "Packet Loss"
+            value: root.formatLoss(root.packetLoss)
+            valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+          }
+          InfoPair { width: parent.cellW; label: "Technology"; value: root.info.tech || "—" }
+          InfoPair {
+            width: parent.cellW
+            label: "Roaming"
+            value: root.roaming ? "Yes" : "No"
+            valueColor: root.roaming ? root.urgent : root.barForeground
+          }
+          InfoPair { width: parent.cellW; label: "Operator"; value: root.info.operator || "—" }
+          InfoPair { width: parent.cellW; label: "Interface"; value: root.info.iface || "—" }
+          InfoPair { width: parent.cellW; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+
+          InfoPair { width: parent.cellW; label: "Receiving"; value: root.hasTransferStats ? root.formatRate(root.downloadRate) : "--" }
+          InfoPair { width: parent.cellW; label: "Sending"; value: root.hasTransferStats ? root.formatRate(root.uploadRate) : "--" }
+          InfoPair { width: parent.cellW; label: "Downloaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.rx_bytes || "0")) : "--" }
+          InfoPair { width: parent.cellW; label: "Uploaded"; value: root.hasTransferStats ? root.formatBytes(parseFloat(root.info.tx_bytes || "0")) : "--" }
+        }
+
+          }
+        }
+
+        // RSRP over the last five minutes: a thin line showing whether the
+        // signal is degrading and whether moving helped, which the
+        // instantaneous number cannot.
+        Column {
+          id: sparkCol
+          // Stays visible once a metric exists: an empty chart during a
+          // sample gap beats the whole section reflowing in and out.
+          // A pinned metric keeps the chart on screen from the moment it
+          // is chosen — empty until samples arrive. Auto still waits for a
+          // first metric so a modem with no signal data shows no chart.
+          // Chartless presets surface this section only in focus mode,
+          // where it is the full-width stat strip.
+          visible: root.hwPresent
+                   && (root.chartless ? root.mgmtView !== ""
+                       : (root.sparkPinned || root.rsrpHistory.length >= 2
+                          || root.sparkMetric !== ""))
+          width: parent.width
+          spacing: Style.space(2)
+
+          readonly property real histLo: {
+            var h = root.rsrpHistory
+            if (h.length === 0) return 0
+            var lo = h[0].v
+            for (var i = 1; i < h.length; i++) if (h[i].v < lo) lo = h[i].v
+            return lo
+          }
+          readonly property real histHi: {
+            var h = root.rsrpHistory
+            if (h.length === 0) return 0
+            var hi = h[0].v
+            for (var i = 1; i < h.length; i++) if (h[i].v > hi) hi = h[i].v
+            return hi
+          }
+
+          Item {
+            width: parent.width
+            visible: !root.chartless
+            implicitHeight: sparkTitle.implicitHeight
+
+            Text {
+              textFormat: Text.PlainText
+              id: sparkTitle
+              anchors.left: parent.left
+              text: (root.sparkMetric
+                     || (root.sparkPinned ? root.info.spark_metric.toUpperCase() : "RSRP"))
+                    + " · LAST " + root.sparkMinutes + " MIN"
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.baseline: sparkTitle.baseline
+              text: {
+                var h = root.rsrpHistory
+                if (h.length === 0) return ""
+                var sum = 0
+                for (var i = 0; i < h.length; i++) sum += h[i].v
+                var unit = root.sparkMetric === "SNR" ? " dB"
+                         : root.sparkMetric === "SIGNAL" ? "%" : " dBm"
+                return "avg " + (sum / h.length).toFixed(0) + unit
+              }
+              visible: !root.sparkSplit
+              color: root.barForeground
+              opacity: 0.5
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Item {
+            width: parent.width
+            // Tall enough for the focus-mode stat rows in both modes, so
+            // entering focus changes only the chart's width, not its height.
+            height: root.chartless ? sparkStats.implicitHeight
+                    : Math.max(Style.space(28), sparkStats.implicitHeight)
+
+            // Focus mode narrows the chart to make room for the live numbers
+            // the folded stats grid would otherwise show.
+            Item {
+              id: sparkChart
+              anchors.left: parent.left
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              visible: !root.chartless
+              width: root.chartless ? 0
+                     : root.sparkSplit ? Math.round(parent.width * 0.55) : parent.width
+              Behavior on width { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+
+            // A subtle background and border mark the chart area, in theme
+            // tones.
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.04)
+              border.color: root.barForeground
+              border.width: 1
+              opacity: 0.5
+            }
+
+            Canvas {
+              id: rsrpSpark
+              anchors.fill: parent
+              anchors.margins: 3
+              onWidthChanged: requestPaint()
+              property var pts: root.rsrpHistory
+              // The theme's accent is the pen; everything else stays neutral.
+              property color line: Color.accent
+              onPtsChanged: requestPaint()
+              onLineChanged: requestPaint()
+              onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                var h = pts
+                if (!h || h.length < 2) return
+                // Autoscaled to the window so whatever movement exists
+                // fills the height; the deltas matter more than the absolute
+                // level. A 1 dB floor guards a flat window.
+                var lo = sparkCol.histLo, hi = sparkCol.histHi
+                if (hi - lo < 1) { var mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5 }
+                var t0 = h[0].t, t1 = h[h.length - 1].t
+                var span = Math.max(1, t1 - t0)
+                // Soft fill under the line first, then the line itself.
+                ctx.beginPath()
+                for (var i = 0; i < h.length; i++) {
+                  var x = (h[i].t - t0) / span * (width - 2) + 1
+                  var y = height - 2 - (h[i].v - lo) / (hi - lo) * (height - 4)
+                  i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+                }
+                ctx.lineTo(x, height)
+                ctx.lineTo(1, height)
+                ctx.closePath()
+                ctx.fillStyle = Qt.rgba(line.r, line.g, line.b, 0.10)
+                ctx.fill()
+
+                ctx.strokeStyle = Qt.rgba(line.r, line.g, line.b, 0.9)
+                ctx.lineWidth = 1.5
+                ctx.beginPath()
+                for (i = 0; i < h.length; i++) {
+                  x = (h[i].t - t0) / span * (width - 2) + 1
+                  y = height - 2 - (h[i].v - lo) / (hi - lo) * (height - 4)
+                  i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+                }
+                ctx.stroke()
+                ctx.fillStyle = line
+                ctx.beginPath()
+                ctx.arc(x, y, 2, 0, Math.PI * 2)
+                ctx.fill()
+              }
+            }
+            }
+
+            // Beside the chart: one narrow column. Chart off: two columns
+            // across the freed width, like the stats grid.
+            Grid {
+              id: sparkStats
+              anchors.left: sparkChart.right
+              anchors.leftMargin: root.chartless ? 0 : Style.space(6)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              columns: root.chartless ? 2 : 1
+              columnSpacing: Style.space(12)
+              rowSpacing: Style.space(1)
+              readonly property real cellW: (width - (root.chartless ? columnSpacing : 0))
+                                            / (root.chartless ? 2 : 1)
+              visible: root.sparkSplit || root.chartless || opacity > 0
+              opacity: (root.sparkSplit || root.chartless) ? 1 : 0
+              Behavior on opacity { NumberAnimation { duration: 150 } }
+
+              InfoPair {
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Signal"
+                value: (root.info.signal || "0") + "%"
+                valueColor: parseInt(root.info.signal || "0") < 25 ? root.urgent : root.barForeground
+              }
+              InfoPair {
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Ping"
+                value: root.formatPing(root.pingLatency)
+                valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+              }
+              InfoPair {
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Packet Loss"
+                value: root.formatLoss(root.packetLoss)
+                valueColor: root.packetLoss > 0 ? root.urgent : root.barForeground
+              }
+              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "Tech"; value: root.info.tech || "—" }
+              InfoPair {
+                width: sparkStats.cellW
+                size: Style.font.caption
+                label: "Roaming"
+                value: root.roaming ? "Yes" : "No"
+                valueColor: root.roaming ? root.urgent : root.barForeground
+              }
+              InfoPair { width: sparkStats.cellW; size: Style.font.caption; label: "IP"; value: (root.info.ip || "—").split("/")[0]; copyValue: (root.info.ip || "").split("/")[0] }
+            }
+          }
+        }
+
+        // The fold resumes below the sparkline; it and the strip above it
+        // stay through focus mode.
+        Item {
+          clip: true
+          width: parent.width
+          height: root.mgmtView === "" ? midFoldB.implicitHeight : 0
+          opacity: root.mgmtView === "" ? 1 : 0
+          Behavior on height { NumberAnimation { duration: 190; easing.type: Easing.OutCubic } }
+          Behavior on opacity { NumberAnimation { duration: 150 } }
+
+          Column {
+            id: midFoldB
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            spacing: Style.space(14)
 
         // ---------- Switches ----------
         // Header rows: settings you flip rarely and read often belong beside
@@ -577,6 +1695,17 @@ Panel {
 
           SwitchRow {
             width: parent.width
+            label: "ALLOW ROAMING"
+            checked: root.info.allow_roaming === "yes"
+            tip: root.info.allow_roaming === "yes"
+              ? "Data may use foreign networks; roaming rates can apply"
+              : "Data only on the home network"
+            onFlipped: root.runAction([root.cli, "roaming",
+                                       root.info.allow_roaming === "yes" ? "no" : "yes"])
+          }
+
+          SwitchRow {
+            width: parent.width
             label: "AUTOCONNECT"
             checked: root.info.autoconnect === "yes"
             tip: root.info.autoconnect === "yes"
@@ -607,19 +1736,30 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            Button {
+            // A link, like Reset counter below: the section's controls are
+            // deliberately quiet, and a bordered button looked too prominent
+            // here.
+            Text {
+              textFormat: Text.PlainText
               id: planButton
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              text: root.limitBytes > 0 ? "Change" : "Set limit"
-              fontSize: Style.font.caption
-              bordered: true
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              active: root.limitEditing
-              onClicked: {
-                root.limitEditing = !root.limitEditing
-                if (root.limitEditing) root.seedLimitFields()
+              text: root.limitEditing ? "Done" : (root.limitBytes > 0 ? "Change" : "Set limit")
+              color: root.barForeground
+              opacity: planArea.containsMouse || root.limitEditing ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: planArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.limitEditing = !root.limitEditing
+                  if (root.limitEditing) root.seedLimitFields()
+                }
               }
             }
           }
@@ -643,8 +1783,21 @@ Panel {
               height: planTrack.height
               radius: planTrack.radius
               width: Math.max(planTrack.height, planTrack.width * root.usedFraction)
-              color: root.usedFraction >= 0.9 ? root.urgent : root.barForeground
+              color: root.usedFraction >= 0.9 ? root.urgent : Color.accent
               Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+            }
+
+            // The calendar's position in the cycle: fill short of the tick
+            // means usage is under pace.
+            Rectangle {
+              visible: root.cycleFraction >= 0
+              x: Math.min(planTrack.width - width, planTrack.width * root.cycleFraction)
+              anchors.verticalCenter: planTrack.verticalCenter
+              width: 3
+              height: planTrack.height + Style.space(6)
+              radius: 1
+              color: root.barForeground
+              opacity: 0.9
             }
           }
 
@@ -734,11 +1887,12 @@ Panel {
                     verticalPadding: Style.space(2)
                     // Seeded on open, not bound: a binding to root.info is
                     // re-asserted on every status poll and overwrites typing.
-                    placeholderText: "5G, 500M; blank for off"
+                    placeholderText: "5G, 500M — blank turns it off"
                     foreground: root.barForeground
                     onAccepted: {
                       var v = text.trim()
-                      root.runAction([root.cli, "limit", v === "" ? "off" : v])
+                      if (!root.runAction([root.cli, "limit", v === "" ? "off" : v]))
+                        return
                       root.limitEditing = false
                     }
                   }
@@ -783,6 +1937,16 @@ Panel {
 
 
 
+              SwitchRow {
+                width: parent.width
+                visible: root.limitBytes > 0
+                label: "STOP DATA AT LIMIT"
+                tip: "Off, it only warns; re-arms when the period resets"
+                checked: !root.limitAck
+                onFlipped: root.runAction([root.cli, "limit", "cutoff",
+                                           root.limitAck ? "on" : "off"])
+              }
+
               // Zeroes the counter, and on a fixed-length bundle restarts the
               // window: topping up buys new days as well as new bytes.
               Item {
@@ -793,8 +1957,8 @@ Panel {
                   textFormat: Text.PlainText
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
-                  visible: root.info.period === "days" && root.info.period_start
-                  text: "Started " + root.info.period_start
+                  visible: root.startedLabel !== ""
+                  text: root.startedLabel
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -900,6 +2064,7 @@ Panel {
             // Whatever the label leaves, less a gap so the two never touch.
             readonly property real avail: Math.max(0, parent.width - modeLabel.implicitWidth - Style.space(10))
             readonly property real cellWidth: (avail - spacing * (root.modeChips.length - 1)) / Math.max(1, root.modeChips.length)
+            enabled: !root.busy
             opacity: root.busy ? 0.5 : 1
 
             Repeater {
@@ -923,10 +2088,490 @@ Panel {
           }
         }
 
-        // ---------- APN ----------
+          }
+        }
+
+        // ---------- Management chips ----------
         PanelSeparator { foreground: root.barForeground }
 
+        Item {
+          id: mgmtChips
+          width: parent.width
+          // Square chips, sized to their glyph. Button.implicitWidth
+          // includes padding, so the size is explicit. Settings sits apart
+          // on the right.
+          readonly property real cell: Math.round(Style.font.body * 2.2)
+          implicitHeight: cell
+
+          Row {
+          anchors.left: parent.left
+          spacing: Style.space(6)
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰄜"
+            tooltipText: "Device details"
+            bordered: true
+            active: root.mgmtView === "device"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("device")
+          }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰒧"
+            tooltipText: "SIM cards and eSIM profiles"
+            bordered: true
+            active: root.mgmtView === "sim"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("sim")
+          }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰖟"
+            tooltipText: "APN and carrier"
+            bordered: true
+            active: root.mgmtView === "apn"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("apn")
+          }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󱄙"
+            tooltipText: "Cell diagnostics"
+            bordered: true
+            active: root.mgmtView === "diag"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("diag")
+          }
+
+          Button {
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰍡"
+            tooltipText: "Text messages"
+            bordered: true
+            active: root.mgmtView === "sms"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.toggleMgmt("sms")
+              if (root.mgmtView === "sms") root.loadSms()
+            }
+          }
+          }
+
+          Button {
+            anchors.right: parent.right
+            width: mgmtChips.cell
+            height: mgmtChips.cell
+            fontSize: Style.font.caption
+            iconSize: Style.font.body
+            iconText: "󰒓"
+            tooltipText: "Settings"
+            bordered: true
+            active: root.mgmtView === "tune"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleMgmt("tune")
+          }
+        }
+
+        // ---------- Messages (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "sms"
+          foreground: root.barForeground
+        }
+
         Column {
+          visible: root.mgmtView === "sms"
+          width: parent.width
+          spacing: Style.space(6)
+
+          PanelSectionHeader {
+            text: "MESSAGES"
+            foreground: root.barForeground
+            fontFamily: root.fontFamily
+          }
+
+          // One line per message, click to expand; the list scrolls past
+          // six or so.
+          ListView {
+            id: smsView
+            width: parent.width
+            height: Math.min(contentHeight, Math.round(Style.font.body * 16))
+            clip: true
+            interactive: contentHeight > height
+            boundsBehavior: Flickable.StopAtBounds
+            spacing: Style.space(3)
+            model: root.smsList
+
+            delegate: Item {
+              id: smsCard
+              required property var modelData
+              readonly property bool open: root.smsOpen === modelData.path
+              width: smsView.width
+              implicitHeight: smsCol.implicitHeight + Style.space(5)
+
+              Rectangle {
+                anchors.fill: parent
+                radius: Style.cornerRadius
+                color: smsCard.open
+                       ? Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.05)
+                       : "transparent"
+                border.color: root.barForeground
+                border.width: 1
+                opacity: smsCard.open ? 0.6 : smsHdrArea.containsMouse ? 0.45 : 0.25
+              }
+
+              Column {
+                id: smsCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(4)
+                anchors.rightMargin: Style.space(4)
+                spacing: Style.space(2)
+
+                Item {
+                  width: parent.width
+                  implicitHeight: smsFrom.implicitHeight
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: smsFrom
+                    anchors.left: parent.left
+                    text: (smsCard.modelData.kind === "sent" ? "→ " : "")
+                          + (smsCard.modelData.number || "unknown")
+                    color: root.barForeground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.weight: Font.DemiBold
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.right: smsDelete.visible ? smsDelete.left : parent.right
+                    anchors.rightMargin: smsDelete.visible ? Style.space(4) : 0
+                    anchors.baseline: smsFrom.baseline
+                    text: smsCard.modelData.time || ""
+                    color: root.barForeground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: smsDelete
+                    visible: smsCard.open
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰩹"
+                    color: root.barForeground
+                    opacity: smsDelArea.containsMouse ? 1 : 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+
+                    MouseArea {
+                      id: smsDelArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(4)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        root.smsOpen = ""
+                        if (root.runAction([root.cli, "sms", "delete", smsCard.modelData.path]))
+                          root.loadSms()
+                      }
+                    }
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  maximumLineCount: smsCard.open ? 100 : 1
+                  elide: smsCard.open ? Text.ElideNone : Text.ElideRight
+                  wrapMode: smsCard.open ? Text.WordWrap : Text.NoWrap
+                  text: smsCard.modelData.text || ""
+                  color: root.barForeground
+                  opacity: smsCard.open ? 0.8 : 0.55
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                id: smsHdrArea
+                anchors.fill: parent
+                anchors.rightMargin: smsCard.open ? Style.space(24) : 0
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.smsOpen = smsCard.open ? "" : smsCard.modelData.path
+                z: -1
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.smsList.length === 0
+            width: parent.width
+            text: "No stored messages."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        // ---------- Diagnostics (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "diag"
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.mgmtView === "diag"
+          width: parent.width
+          spacing: Style.space(6)
+
+          Item {
+            width: parent.width
+            implicitHeight: diagHeader.implicitHeight
+
+            PanelSectionHeader {
+              id: diagHeader
+              text: "CELL DIAGNOSTICS"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.verticalCenter: diagHeader.verticalCenter
+              anchors.verticalCenterOffset: Math.round(diagHeader.topPadding / 2)
+              text: root.diagLoading ? "Surveying…" : "Survey cells"
+              color: root.barForeground
+              opacity: diagReadArea.containsMouse || root.diagLoading ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: diagReadArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                enabled: !root.diagLoading
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.diagLoading = true
+                  diagProc.running = true
+                }
+              }
+
+              PanelToolTip {
+                visible: diagReadArea.containsMouse
+                text: "Asks the modem for every cell it can hear"
+                fontFamily: root.fontFamily
+              }
+            }
+          }
+
+          // A column-per-field table with a header row.
+          Column {
+            id: diagTable
+            visible: root.diagRows.length > 0
+            width: parent.width
+            spacing: Style.space(2)
+
+            readonly property real cId: width * 0.10
+            readonly property real cGen: width * 0.12
+            readonly property real cRole: width * 0.06
+            readonly property real cBand: width * 0.18
+            readonly property real cWidth: width * 0.13
+            readonly property real cCh: width * 0.15
+            readonly property real cRssi: width * 0.13
+
+            component DiagCell: Text {
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: {
+                var n = 0
+                for (var i = 0; i < root.diagRows.length; i++)
+                  if (root.diagRows[i].role !== "") n++
+                return n > 1
+              }
+              width: parent.width
+              text: {
+                var parts = [], total = 0
+                for (var i = 0; i < root.diagRows.length; i++) {
+                  var r = root.diagRows[i]
+                  if (r.role === "" || !r.width) continue
+                  parts.push(r.width)
+                  total += parseInt(r.width)
+                }
+                return "Aggregated  " + parts.join(" + ") + " = " + total + " MHz"
+              }
+              color: root.barForeground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Row {
+              width: parent.width
+              Repeater {
+                model: [["ID", diagTable.cId], ["TECH", diagTable.cGen],
+                        ["CA", diagTable.cRole],
+                        ["BAND", diagTable.cBand], ["WIDTH", diagTable.cWidth],
+                        ["CH", diagTable.cCh], ["RSSI", diagTable.cRssi]]
+                DiagCell {
+                  required property var modelData
+                  width: modelData[1]
+                  text: modelData[0]
+                  opacity: 0.45
+                  font.letterSpacing: 1
+                }
+              }
+              DiagCell {
+                width: diagTable.width - diagTable.cGen - diagTable.cBand
+                       - diagTable.cWidth - diagTable.cCh - diagTable.cId
+                       - diagTable.cRssi - diagTable.cRole
+                horizontalAlignment: Text.AlignRight
+                text: "RSRP"
+                opacity: 0.45
+                font.letterSpacing: 1
+              }
+            }
+
+            Repeater {
+              model: root.diagRows
+              delegate: Row {
+                id: diagRow
+                required property var modelData
+                width: diagTable.width
+
+                DiagCell {
+                  width: diagTable.cId
+                  text: diagRow.modelData.id
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cGen
+                  text: diagRow.modelData.gen
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cRole
+                  text: diagRow.modelData.role
+                  color: Color.accent
+                  opacity: diagRow.modelData.role ? 1 : 0
+                  font.weight: Font.DemiBold
+                }
+                DiagCell {
+                  width: diagTable.cBand
+                  text: diagRow.modelData.band
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cWidth
+                  text: diagRow.modelData.width ? diagRow.modelData.width + " MHz" : ""
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+                DiagCell {
+                  width: diagTable.cCh
+                  text: diagRow.modelData.ch
+                  opacity: diagRow.modelData.serving ? 1 : 0.7
+                }
+                DiagCell {
+                  width: diagTable.cRssi
+                  text: diagRow.modelData.rssi || "—"
+                  color: diagRow.modelData.rssi
+                         ? root.sigColor("rssi", diagRow.modelData.rssi)
+                         : root.barForeground
+                  opacity: diagRow.modelData.serving ? 0.9 : 0.65
+                }
+                DiagCell {
+                  width: diagTable.width - diagTable.cGen - diagTable.cBand
+                         - diagTable.cWidth - diagTable.cCh - diagTable.cId
+                         - diagTable.cRssi - diagTable.cRole
+                  horizontalAlignment: Text.AlignRight
+                  text: diagRow.modelData.rsrp || "—"
+                  color: diagRow.modelData.rsrp
+                         ? root.sigColor("rsrp", diagRow.modelData.rsrp)
+                         : root.barForeground
+                  opacity: diagRow.modelData.serving ? 1 : 0.75
+                  font.weight: diagRow.modelData.serving ? Font.DemiBold : Font.Normal
+                }
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.diagRows.length > 0
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Neighbors are reported for the current radio mode only."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.diagCells.length === 0 && !root.diagLoading
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Nothing surveyed yet. Survey cells needs authorization."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+
+        }
+
+        // ---------- APN (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "apn"
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.mgmtView === "apn"
           width: parent.width
           spacing: Style.space(10)
 
@@ -952,7 +2597,8 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: apnLabel.verticalCenter
               anchors.verticalCenterOffset: Math.round(apnLabel.topPadding / 2)
-              text: root.carrierExpanded ? "󰅀" : "󰅂"
+              visible: false
+              text: ""
               color: root.barForeground
               opacity: 0.6
               font.family: root.fontFamily
@@ -970,7 +2616,7 @@ Panel {
                                  - apnChevron.implicitWidth - Style.space(16))
               horizontalAlignment: Text.AlignRight
               elide: Text.ElideRight
-              text: root.info.apn || "from network"
+              text: root.info.apn || "automatic"
               color: root.barForeground
               opacity: root.info.apn ? 1 : 0.6
               font.family: root.fontFamily
@@ -983,7 +2629,7 @@ Panel {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: {
-                root.carrierExpanded = !root.carrierExpanded
+                root.carrierExpanded = true
                 if (!root.carrierExpanded) root.apnEditing = false
               }
             }
@@ -1009,7 +2655,7 @@ Panel {
               fontFamily: root.fontFamily
               // Needs no input and the panel shows the result, so it runs in
               // place.
-              onClicked: root.runAction(["sh", "-c", JSON.stringify(root.cli) + " carrier auto && " + JSON.stringify(root.cli) + " apply"])
+              onClicked: root.runAction([root.cli, "carrier", "auto"], [root.cli, "apply"])
             }
 
             Button {
@@ -1021,9 +2667,20 @@ Panel {
               text: "Lookup"
               tooltipText: "Find your carrier's APN in the provider database"
               bordered: true
+              active: root.apnBrowse
               foreground: root.barForeground
               fontFamily: root.fontFamily
-              onClicked: root.runDetached(root.cli + " carrier choose")
+              onClicked: {
+                root.apnBrowse = !root.apnBrowse
+                if (root.apnBrowse) {
+                  root.browseCc = ""
+                  root.browseCcName = ""
+                  root.browseProv = ""
+                  browseFilter.text = ""
+                  root.browseLoad()
+                  browseFilter.forceActiveFocus()
+                }
+              }
             }
 
             Button {
@@ -1047,6 +2704,112 @@ Panel {
 
           }
 
+          // The provider database, staged in place: countries, then the
+          // country's carriers, then that carrier's APNs; a tap applies.
+          Item {
+            width: parent.width
+            clip: true
+            height: (root.carrierExpanded && root.apnBrowse) ? browseCol.implicitHeight : 0
+            Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+
+            Column {
+              id: browseCol
+              width: parent.width
+              spacing: Style.space(4)
+
+              TextField {
+                id: browseFilter
+                width: parent.width
+                font.pixelSize: Style.font.caption
+                verticalPadding: Style.space(2)
+                placeholderText: root.browseProv !== "" ? root.browseProv + " APNs"
+                                 : root.browseCc !== "" ? "Filter carriers in " + root.browseCcName
+                                 : "Filter countries"
+                foreground: root.barForeground
+              }
+
+              ListView {
+                id: browseList
+                width: parent.width
+                height: Math.min(contentHeight, Style.space(180))
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+                spacing: Style.space(1)
+
+                model: {
+                  var out = []
+                  if (root.browseCc !== "")
+                    out.push({ kind: "back",
+                               label: "‹  " + (root.browseProv !== "" ? root.browseCcName : "Countries"),
+                               sub: "" })
+                  var f = browseFilter.text.toLowerCase()
+                  for (var i = 0; i < root.browseRows.length; i++) {
+                    var r = root.browseRows[i]
+                    var kind = root.browseProv !== "" ? "apn"
+                             : root.browseCc !== "" ? "provider" : "country"
+                    var label = kind === "country" ? r.c1 : r.c0
+                    var sub = kind === "country" ? r.c0 : kind === "apn" ? r.c1 : ""
+                    if (f !== "" && (label + " " + sub).toLowerCase().indexOf(f) === -1) continue
+                    out.push({ kind: kind, label: label, sub: sub, c0: r.c0 })
+                  }
+                  return out
+                }
+
+                delegate: Item {
+                  id: browseRow
+                  required property var modelData
+                  width: browseList.width
+                  height: browseLabel.implicitHeight + Style.space(4)
+
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Style.cornerRadius
+                    color: root.barForeground
+                    opacity: browseRowArea.containsMouse ? 0.08 : 0
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: browseLabel
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(3)
+                    anchors.right: browseSub.left
+                    anchors.rightMargin: Style.space(4)
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideRight
+                    text: browseRow.modelData.label
+                    color: root.barForeground
+                    opacity: browseRow.modelData.kind === "back" ? 0.6 : 0.85
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: browseSub
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(3)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: browseRow.modelData.sub
+                    color: root.barForeground
+                    opacity: 0.4
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: browseRowArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.browsePick(browseRow.modelData)
+                  }
+                }
+              }
+            }
+          }
+
           // Inline; the panel already takes keyboard focus for its own
           // navigation. Collapsed to zero height when unused.
           Item {
@@ -1059,24 +2822,187 @@ Panel {
               font.pixelSize: Style.font.caption
               verticalPadding: Style.space(2)
               width: parent.width
-              placeholderText: "APN — blank lets the network choose"
+              placeholderText: "APN — blank for automatic"
               foreground: root.barForeground
+              enabled: !root.busy
+              opacity: root.busy ? 0.5 : 1
               onAccepted: {
+                if (!root.runAction([root.cli, "apn", text], [root.cli, "apply"]))
+                  return
                 root.apnEditing = false
-                root.runAction(["sh", "-c", JSON.stringify(root.cli) + " apn " + JSON.stringify(text) + " && " + JSON.stringify(root.cli) + " apply"])
               }
             }
           }
         }
 
-        // ---------- Device ----------
+        // ---------- Settings (behind its chip) ----------
         PanelSeparator {
-          visible: root.hwPresent
+          visible: root.hwPresent && root.mgmtView === "tune"
           foreground: root.barForeground
         }
 
         Column {
-          visible: root.hwPresent
+          visible: root.hwPresent && root.mgmtView === "tune"
+          width: parent.width
+          spacing: Style.space(8)
+
+          Item {
+            width: parent.width
+            implicitHeight: tuneHeader.implicitHeight
+
+            PanelSectionHeader {
+              id: tuneHeader
+              text: "SETTINGS"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              anchors.left: parent.left
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.baseline: tuneHeader.baseline
+              text: "Save"
+              color: root.barForeground
+              opacity: saveArea.containsMouse && !root.busy ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: saveArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                cursorShape: root.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
+                enabled: !root.busy
+                onClicked: root.tuneSave()
+              }
+            }
+          }
+
+          TuneGroup {
+            title: "DISPLAY"
+
+            TuneDrop {
+              id: tuneStatsDrop
+              label: "LAYOUT"
+              options: [{ value: "full", label: "Chart + full stats" },
+                        { value: "minimal", label: "Chart + stats" },
+                        { value: "compact", label: "Split chart | stats" },
+                        { value: "chart", label: "Chart only" },
+                        { value: "stats", label: "Stats only" },
+                        { value: "hidden", label: "Hidden" }]
+              current: root.displayMode
+              tuneKey: "stats"
+            }
+
+            TuneDrop {
+              id: tuneMetricDrop
+              label: "CHART METRIC"
+              // RSRP against RSSI is the RAT's choice, not the user's;
+              // the sticky auto logic is that pair.
+              options: [{ value: "auto", label: "RSSI/RSRP" },
+                        { value: "snr", label: "SNR" },
+                        { value: "signal", label: "Signal quality" }]
+              current: root.info.spark_metric || "auto"
+              tuneKey: "spark-metric"
+            }
+
+            TuneField {
+              id: tunePeriodField
+              label: "PERIOD (MIN)"
+              hint: "5"
+              tuneKey: "spark-minutes"
+            }
+          }
+
+          TuneGroup {
+            title: "PANEL"
+
+            TuneField {
+              id: tuneIntervalField
+              label: "IDLE POLL (SEC)"
+              hint: "60"
+              tuneKey: "interval"
+            }
+
+            TuneDrop {
+              id: tuneSmsDrop
+              label: "SMS ALERTS"
+              options: [{ value: "yes", label: "On" }, { value: "no", label: "Off" }]
+              current: (root.info.sms_notify || "") !== ""
+                       ? root.info.sms_notify
+                       : (root.setting("smsNotify", true) ? "yes" : "no")
+              tuneKey: "sms-notify"
+            }
+          }
+
+          TuneGroup {
+            title: "NETWORK"
+
+            TuneDrop {
+              id: tuneIpDrop
+              label: "IP TYPE"
+              options: [{ value: "ipv4v6", label: "IPv4 + IPv6" },
+                        { value: "ipv4", label: "IPv4" },
+                        { value: "ipv6", label: "IPv6" }]
+              current: root.info.ip_type || "ipv4v6"
+              tuneKey: "ip-type"
+            }
+
+            TuneField {
+              id: tuneMetricField
+              label: "ROUTE METRIC"
+              hint: "700"
+              tuneKey: "route-metric"
+            }
+
+            TuneField {
+              id: tuneOperatorField
+              label: "OPERATOR ID"
+              hint: "automatic"
+              tuneKey: "operator-id"
+            }
+          }
+
+          TuneGroup {
+            title: "MODEM"
+
+            TuneDrop {
+              id: tuneDeviceDrop
+              label: "DEVICE"
+              verb: "device"
+              options: root.devices.map(function (d) {
+                return { value: d.port, label: (d.model || "Modem") + " · " + d.port }
+              })
+              current: {
+                for (var i = 0; i < root.devices.length; i++)
+                  if (root.devices[i].active === "yes") return root.devices[i].port
+                return ""
+              }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.devices.length > 1
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "Selecting a modem disables the others."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+
+        // ---------- Device (behind its chip) ----------
+        PanelSeparator {
+          visible: root.hwPresent && root.mgmtView === "device"
+          foreground: root.barForeground
+        }
+
+        Column {
+          visible: root.hwPresent && root.mgmtView === "device"
           width: parent.width
           spacing: Style.space(10)
 
@@ -1102,7 +3028,8 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: detailsHeader.verticalCenter
               anchors.verticalCenterOffset: Math.round(detailsHeader.topPadding / 2)
-              text: root.deviceExpanded ? "󰅀" : "󰅂"
+              visible: false
+              text: ""
               color: root.barForeground
               opacity: 0.6
               font.family: root.fontFamily
@@ -1112,7 +3039,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               id: deviceName
-              visible: !root.deviceExpanded
+              visible: false
               anchors.right: chevron.left
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: detailsHeader.verticalCenter
@@ -1152,7 +3079,7 @@ Panel {
               anchors.bottom: parent.bottom
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
-              onClicked: root.deviceExpanded = !root.deviceExpanded
+              onClicked: root.deviceExpanded = true
             }
           }
 
@@ -1163,7 +3090,7 @@ Panel {
             clip: true
             // No height animation: the panel is a layer-shell surface, so
             // animating this reconfigures the Wayland surface every frame.
-            height: root.deviceExpanded ? deviceRows.implicitHeight : 0
+            height: deviceRows.implicitHeight
 
           Column {
             id: deviceRows
@@ -1190,27 +3117,30 @@ Panel {
             InfoPair { label: "Carrier"; value: root.info.carrier_config || "—" }
             InfoPair { label: "Modem"; value: root.info.model || "—" }
             InfoPair { label: "Firmware"; value: root.info.firmware || "—" }
+            InfoPair { label: "Device path"; value: root.info.port ? "/dev/" + root.info.port : "—"; copyValue: root.info.port ? "/dev/" + root.info.port : "" }
+
           }
           }
         }
 
-        // ---------- SIM slot ----------
-        PanelSeparator { foreground: root.barForeground }
+        // ---------- SIM cards (behind its chip) ----------
+        PanelSeparator {
+          visible: root.mgmtView === "sim"
+          foreground: root.barForeground
+        }
 
         Column {
+          visible: root.mgmtView === "sim"
           width: parent.width
           spacing: Style.space(10)
 
-          // What is in the slot, beside the title. The card's provider, not the
-          // network operator: an Airalo profile roaming on Verizon reads
-          // "Airalo" here and "Verizon Wireless" in the hero.
           Item {
             width: parent.width
-            implicitHeight: Math.max(simHeader.implicitHeight, simWho.implicitHeight)
+            implicitHeight: Math.max(simHeader.implicitHeight, manageLink.implicitHeight)
 
             PanelSectionHeader {
               id: simHeader
-              text: "SIM CARD"
+              text: "SIM CARD SELECTION"
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
               foreground: root.barForeground
@@ -1219,86 +3149,260 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              id: simWho
+              id: manageLink
               anchors.right: parent.right
               anchors.verticalCenter: simHeader.verticalCenter
               anchors.verticalCenterOffset: Math.round(simHeader.topPadding / 2)
-              width: Math.max(0, parent.width - simHeader.implicitWidth - Style.space(10))
-              horizontalAlignment: Text.AlignRight
-              elide: Text.ElideRight
-              text: root.simLabel
+              text: root.esimExpanded ? "Close eSIM management" : "Manage eSIM…"
               color: root.barForeground
-              opacity: text === "" ? 0 : 0.6
+              opacity: !root.esimSelected ? 0.35
+                       : manageArea.containsMouse || root.esimExpanded ? 1 : 0.6
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: manageArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                // Hover stays live while the control is unavailable, so the
+                // tooltip can say why; only the click is gated.
+                hoverEnabled: true
+                cursorShape: root.esimSelected ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                  if (!root.esimSelected) return
+                  root.esimExpanded = !root.esimExpanded
+                  if (root.esimExpanded) root.loadProfiles()
+                  else root.sessionStop()
+                }
+              }
+
+              PanelToolTip {
+                visible: manageArea.containsMouse
+                text: root.esimSelected
+                      ? "Rename, add, or remove eSIM profiles"
+                      : "Select the eSIM first to manage its profiles"
+                fontFamily: root.fontFamily
+              }
             }
           }
 
-          Row {
-            id: simRow
+Column {
+            id: simList
             width: parent.width
-            spacing: Style.space(6)
-            // Three cells only when the eSIM is selected, and not equal thirds:
-            // "eSIM Profiles" is twice the label the slots carry.
-            readonly property int cells: root.info.slot === "2" ? 3 : 2
-            readonly property real usable: width - spacing * (cells - 1)
-            readonly property real cellWidth: cells === 3 ? usable * 0.28 : usable / 2
-            readonly property real wideWidth: usable - cellWidth * 2
-            // A slot switch is in flight; dim the row so swallowed clicks read
-            // as busy.
+            spacing: Style.space(2)
+            // A switch is in flight; the list is unavailable until it lands.
+            enabled: !root.busy
             opacity: root.busy ? 0.5 : 1
 
-            Button {
-              width: simRow.cellWidth
-              fontSize: Style.font.caption
-              verticalPadding: Style.space(2)
-              iconSize: Style.font.bodySmall
-              iconText: "󰒧"
-              text: root.info.slot1_sim === "no" ? "Physical · empty" : "Physical"
-              tooltipText: root.info.slot1_sim === "no" ? "No card in the slot" : ""
-              opacity: root.info.slot1_sim === "no" ? 0.55 : 1
-              bordered: true
-              active: root.info.slot === "1"
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              onClicked: if (root.info.slot !== "1") root.runAction([root.cli, "sim", "1"])
-            }
+            Flow {
+              id: simFlow
+              width: parent.width
+              spacing: Style.space(7)
 
-            Button {
-              width: simRow.cellWidth
-              fontSize: Style.font.caption
-              verticalPadding: Style.space(2)
-              iconSize: Style.font.bodySmall
-              iconText: "󱤓"
-              text: root.info.slot2_sim === "no" ? "eSIM · empty" : "eSIM"
-              tooltipText: root.info.slot2_sim === "no" ? "No profile installed on the eSIM" : ""
-              opacity: root.info.slot2_sim === "no" ? 0.55 : 1
-              bordered: true
-              active: root.info.slot === "2"
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              onClicked: if (root.info.slot !== "2") root.runAction([root.cli, "sim", "2"])
-            }
+              Repeater {
+                model: root.sims
+                delegate: Item {
+                  id: simTile
+                  required property var modelData
+                  readonly property bool isActive: modelData.active === "yes"
+                  width: (simFlow.width - Style.space(7)) / 2
+                  height: Math.round(Style.font.body * 5.4)
+                  // The bevel that makes a rectangle read as a SIM card.
+                  readonly property real notch: Math.round(Style.font.body * 1.1)
 
-            // The lock glyph says the click costs a prompt. It also costs the
-            // connection: lpac needs the AT port, so ModemManager is stopped.
-            Button {
-              visible: root.info.slot === "2"
-              width: simRow.wideWidth
-              fontSize: Style.font.caption
-              verticalPadding: Style.space(2)
-              iconSize: Style.font.bodySmall
-              iconText: "󰌾"
-              text: "eSIM Profiles"
-              tooltipText: "Stops the modem briefly to read the eSIM"
-              bordered: true
-              active: root.esimExpanded
-              foreground: root.barForeground
-              fontFamily: root.fontFamily
-              onClicked: {
-                root.esimExpanded = !root.esimExpanded
-                if (root.esimExpanded && root.profiles.length === 0) root.loadProfiles()
+                  Canvas {
+                    anchors.fill: parent
+                    property color line: root.barForeground
+                    property bool on: simTile.isActive
+                    opacity: on ? 0.9 : tileArea.containsMouse ? 0.55 : 0.3
+                    onLineChanged: requestPaint()
+                    onOnChanged: requestPaint()
+                    onPaint: {
+                      var ctx = getContext("2d")
+                      ctx.reset()
+                      var w = width - 1, h = height - 1
+                      var r = Math.max(0, Style.cornerRadius)
+                      var n = simTile.notch
+                      ctx.translate(0.5, 0.5)
+                      ctx.beginPath()
+                      ctx.moveTo(n, 0)
+                      ctx.lineTo(w - r, 0)
+                      ctx.arcTo(w, 0, w, r, r)
+                      ctx.lineTo(w, h - r)
+                      ctx.arcTo(w, h, w - r, h, r)
+                      ctx.lineTo(r, h)
+                      ctx.arcTo(0, h, 0, h - r, r)
+                      ctx.lineTo(0, n)
+                      ctx.closePath()
+                      if (on) {
+                        ctx.fillStyle = Qt.rgba(line.r, line.g, line.b, 0.12)
+                        ctx.fill()
+                      }
+                      ctx.strokeStyle = line
+                      ctx.lineWidth = 1
+                      ctx.stroke()
+                    }
+                  }
+
+                  // With the notch top-left, the contact pad reads right:
+                  // glyph bottom-right, like the real card.
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.rightMargin: Style.space(8)
+                    anchors.bottomMargin: Style.space(5)
+                    text: simTile.modelData.kind === "physical" ? "󰒧" : "󱤓"
+                    color: root.barForeground
+                    opacity: simTile.isActive ? 0.7 : 0.35
+                    font.family: root.fontFamily
+                    font.pixelSize: Math.round(Style.font.body * 2)
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: tileName
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(4)
+                    anchors.leftMargin: simTile.notch + Style.space(2)
+                    anchors.right: tileKind.left
+                    anchors.rightMargin: Style.space(3)
+                    elide: Text.ElideRight
+                    text: simTile.modelData.name || simTile.modelData.provider || "Unnamed"
+                    color: root.barForeground
+                    opacity: simTile.isActive ? 1 : 0.8
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.leftMargin: simTile.notch + Style.space(2)
+                    anchors.top: tileName.bottom
+                    anchors.topMargin: Style.space(1)
+                    anchors.right: parent.horizontalCenter
+                    elide: Text.ElideRight
+                    visible: text !== ""
+                    text: simTile.modelData.provider
+                          && simTile.modelData.provider !== simTile.modelData.name
+                          ? simTile.modelData.provider : ""
+                    color: root.barForeground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: tileKind
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(4)
+                    text: simTile.modelData.kind === "physical" ? "physical" : "eSIM"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(4)
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: Style.space(3)
+                    text: simTile.modelData.iccid
+                          ? "····" + String(simTile.modelData.iccid).slice(-4)
+                          : "no profiles"
+                    color: root.barForeground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: tileArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: simTile.isActive ? Qt.ArrowCursor : Qt.PointingHandCursor
+                    onClicked: {
+                      if (simTile.isActive) return
+                      // A bare eUICC has no profile to 'use'; selecting its
+                      // slot is the bootstrap that makes Manage reachable.
+                      if (simTile.modelData.kind === "esim-slot")
+                        root.runAction([root.cli, "sim", simTile.modelData.slot, "--force"])
+                      else
+                        root.runAction([root.cli, "use", simTile.modelData.iccid])
+                    }
+                  }
+
+                  PanelToolTip {
+                    visible: tileArea.containsMouse && !simTile.isActive
+                    text: simTile.modelData.kind === "esim-slot"
+                          ? "Select the eSIM slot; add profiles from Manage eSIM"
+                          : "Switch to this card; the modem reconnects"
+                    fontFamily: root.fontFamily
+                  }
+                }
               }
+            }
+
+            // The list can only name profiles a profile read has seen.
+            Text {
+              textFormat: Text.PlainText
+              visible: root.sims.length <= 1 && root.hasEsim
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: "eSIM profiles appear here after the first Manage eSIM visit."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            // Management is its own section, and the eUICC only answers
+            // while it is the selected card.
+            Item {
+              width: parent.width
+              visible: root.esimExpanded
+              height: refreshLink.implicitHeight + Style.space(4)
+
+              Text {
+                textFormat: Text.PlainText
+                id: refreshLink
+                visible: root.esimExpanded
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(4)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.profilesStale ? "Refresh · after scan" : "Refresh"
+                color: root.barForeground
+                opacity: root.profilesStale ? 1
+                         : refreshArea.containsMouse ? 1 : 0.6
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+
+                MouseArea {
+                  id: refreshArea
+                  anchors.fill: parent
+                  anchors.margins: -Style.space(4)
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.profilesStale = false
+                    root.profiles = []
+                    root.loadProfiles()
+                  }
+                }
+
+                PanelToolTip {
+                  visible: refreshArea.containsMouse
+                  text: root.profilesStale
+                        ? "A scan ran; re-read the eSIM to see what it installed"
+                        : "Re-read profiles from the eSIM"
+                  fontFamily: root.fontFamily
+                }
+              }
+
             }
           }
         }
@@ -1316,13 +3420,39 @@ Panel {
               width: parent.width
               spacing: Style.space(6)
 
+              PanelSeparator { foreground: root.barForeground }
+
+              Item {
+                width: parent.width
+                implicitHeight: esimHeader.implicitHeight
+
+                PanelSectionHeader {
+                  id: esimHeader
+                  text: "ESIM PROFILES"
+                  foreground: root.barForeground
+                  fontFamily: root.fontFamily
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  visible: root.euiccFree !== ""
+                  anchors.right: parent.right
+                  anchors.verticalCenter: esimHeader.verticalCenter
+                  anchors.verticalCenterOffset: Math.round(esimHeader.topPadding / 2)
+                  text: root.euiccFree
+                  color: root.barForeground
+                  opacity: 0.5
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
               Text {
                 textFormat: Text.PlainText
                 visible: root.profilesLoading
                 width: parent.width
                 wrapMode: Text.WordWrap
-                // Says why the connection just dropped, at the moment it does.
-                text: "Reading the eSIM, briefly dropping data…"
+                text: "Reading the eSIM…"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1334,7 +3464,7 @@ Panel {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 text: root.profileError
-                  ? root.profileError + "  Try Refresh."
+                  ? root.profileError
                   : "No profiles installed on this eSIM."
                 color: root.dim
                 font.family: root.fontFamily
@@ -1343,80 +3473,204 @@ Panel {
 
               Repeater {
                 model: root.profiles
-                Row {
-                  id: profileRow
+                Item {
+                  id: profileCard
                   required property var modelData
+                  readonly property bool isOn: root.profileEnabled(modelData)
                   width: esimCol.width
-                  spacing: Style.space(4)
-                  // Explicit chip width: Button.implicitWidth includes its
-                  // horizontal padding, so `width: height` does not actually
-                  // make a square and the last chip lands off the panel.
-                  readonly property real chip: Style.font.body * 2
+                  height: cardCol.implicitHeight + Style.space(8)
 
-                  Button {
-                    id: profileName
-                    width: profileRow.width - profileRow.spacing * 2 - profileRow.chip * 2
-                    height: addBtn.height
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.space(2)
-                    text: root.shortLabel(modelData.name, modelData.provider)
-                    tooltipText: (root.profileEnabled(modelData)
-                      ? "Active profile" : "Switch to this profile")
-                      + (modelData.class === "test" ? " (test profile)" : "")
-                    bordered: true
-                    active: root.profileEnabled(modelData)
-                    // Never dim the enabled one; stacked with the selected fill
-                    // it cancels the highlight out.
-                    opacity: modelData.class === "test"
-                      && !root.profileEnabled(modelData) ? 0.6 : 1
-                    foreground: root.barForeground
-                    fontFamily: root.fontFamily
-                    onClicked: if (!root.profileEnabled(modelData)) {
-                      root.runAction([root.cli, "profile", "enable", modelData.iccid])
+                  Rectangle {
+                    anchors.fill: parent
+                    // The theme's own corner treatment, like every Button.
+                    radius: Style.cornerRadius
+                    color: "transparent"
+                    border.color: root.barForeground
+                    border.width: 1
+                    opacity: profileCard.isOn ? 0.8
+                             : cardArea.containsMouse ? 0.55 : 0.3
+                  }
+
+                  // Status rail: state runs vertically along the card's edge.
+                  // INACTIVE does not fit two lines of card, so a quiet rail
+                  // with no word is the inactive state.
+                  Item {
+                    id: statusRail
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 1
+                    width: Math.round(Style.font.caption * 2)
+
+                    // The rail itself is the highlight: filled when active,
+                    // near-silent when not.
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: Math.max(0, Style.cornerRadius - 1)
+                      color: root.barForeground
+                      opacity: profileCard.isOn ? 0.22 : 0.05
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.centerIn: parent
+                      rotation: -90
+                      // Rotated, the text's width runs along the card's height;
+                      // cap it there and let the size fit, so the word never
+                      // reaches the box edges.
+                      width: parent.height - Style.space(8)
+                      height: parent.width
+                      horizontalAlignment: Text.AlignHCenter
+                      verticalAlignment: Text.AlignVCenter
+                      fontSizeMode: Text.HorizontalFit
+                      minimumPixelSize: 6
+                      text: profileCard.isOn ? "ACTIVE"
+                            : profileCard.modelData.class === "test" ? "TEST" : ""
+                      color: root.barForeground
+                      opacity: profileCard.isOn ? 1 : 0.5
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.letterSpacing: 1
+                    }
+                  }
+
+                  MouseArea {
+                    id: cardArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: profileCard.isOn ? Qt.ArrowCursor : Qt.PointingHandCursor
+                    onClicked: if (!profileCard.isOn) {
+                      root.sessionSend("enable " + modelData.iccid)
                       root.applyProfileChange(modelData.iccid, "enable")
                     }
                   }
 
-                  Button {
-                    width: profileRow.chip
-                    height: addBtn.height
-                    iconSize: Style.font.caption
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.space(2)
-                    horizontalPadding: Style.space(2)
-                    iconText: "󰑕"
-                    tooltipText: "Rename"
-                    bordered: true
-                    foreground: root.barForeground
-                    fontFamily: root.fontFamily
-                    onClicked: {
-                      root.renamingIccid = root.renamingIccid === modelData.iccid
-                        ? "" : modelData.iccid
-                      if (root.renamingIccid !== "") {
-                        renameField.text = modelData.name || ""
-                        renameField.forceActiveFocus()
-                      }
-                    }
-                  }
+                  Column {
+                    id: cardCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: statusRail.width + Style.space(6)
+                    anchors.rightMargin: Style.space(6)
+                    spacing: Style.space(2)
 
-                  Button {
-                    width: profileRow.chip
-                    height: addBtn.height
-                    iconSize: Style.font.caption
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.space(2)
-                    horizontalPadding: Style.space(2)
-                    iconText: "󰩹"
-                    tooltipText: root.profileEnabled(modelData)
-                      ? "Can't delete the active profile — switch to another first"
-                      : "Delete this profile"
-                    bordered: true
-                    opacity: root.profileEnabled(modelData) ? 0.4 : 1
-                    foreground: root.barForeground
-                    fontFamily: root.fontFamily
-                    onClicked: if (!root.profileEnabled(modelData)) {
-                      root.runAction([root.cli, "profile", "delete", modelData.iccid])
-                      root.applyProfileChange(modelData.iccid, "delete")
+                    Item {
+                      width: parent.width
+                      height: iccidText.implicitHeight
+
+                      Text {
+                        textFormat: Text.PlainText
+                        id: iccidText
+                        anchors.left: parent.left
+                        text: profileCard.modelData.iccid
+                        color: root.barForeground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+
+                    }
+
+                    Item {
+                      width: parent.width
+                      height: Math.max(nameText.implicitHeight, cardActions.implicitHeight)
+
+                      Text {
+                        textFormat: Text.PlainText
+                        id: nameText
+                        anchors.left: parent.left
+                        anchors.right: cardActions.left
+                        anchors.rightMargin: Style.space(4)
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideRight
+                        text: (profileCard.modelData.name || "Unnamed")
+                              + (profileCard.modelData.provider
+                                 && profileCard.modelData.provider !== profileCard.modelData.name
+                                 ? "  ·  " + profileCard.modelData.provider : "")
+                        color: root.barForeground
+                        opacity: 0.65
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Row {
+                        id: cardActions
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(8)
+
+                        Item {
+                          width: Math.round(Style.font.body * 2)
+                          height: width
+
+                          Text {
+                            textFormat: Text.PlainText
+                            anchors.centerIn: parent
+                            text: "󰑕"
+                            color: root.barForeground
+                            opacity: renameArea.containsMouse ? 1 : 0.55
+                            font.family: root.fontFamily
+                            font.pixelSize: Math.round(Style.font.body * 1.3)
+                          }
+
+                          MouseArea {
+                            id: renameArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              root.renamingIccid =
+                                root.renamingIccid === profileCard.modelData.iccid
+                                ? "" : profileCard.modelData.iccid
+                              if (root.renamingIccid !== "") {
+                                renameField.text = profileCard.modelData.name || ""
+                                renameField.forceActiveFocus()
+                              }
+                            }
+                          }
+
+                          PanelToolTip {
+                            visible: renameArea.containsMouse
+                            text: "Rename"
+                            fontFamily: root.fontFamily
+                          }
+                        }
+
+                        Item {
+                          width: Math.round(Style.font.body * 2)
+                          height: width
+
+                          Text {
+                            textFormat: Text.PlainText
+                            anchors.centerIn: parent
+                            text: "󰩹"
+                            color: root.barForeground
+                            opacity: profileCard.isOn ? 0.25
+                                     : deleteArea.containsMouse ? 1 : 0.55
+                            font.family: root.fontFamily
+                            font.pixelSize: Math.round(Style.font.body * 1.3)
+                          }
+
+                          MouseArea {
+                            id: deleteArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: !profileCard.isOn
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                              root.sessionSend("delete " + profileCard.modelData.iccid)
+                              root.applyProfileChange(profileCard.modelData.iccid, "delete")
+                            }
+                          }
+
+                          PanelToolTip {
+                            visible: deleteArea.containsMouse
+                            text: profileCard.isOn
+                                  ? "The active profile cannot be deleted"
+                                  : "Delete this profile"
+                            fontFamily: root.fontFamily
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -1437,11 +3691,11 @@ Panel {
                   Keys.onEscapePressed: { root.renamingIccid = ""; text = "" }
                   onAccepted: {
                     var target = root.renamingIccid
-                    root.renamingIccid = ""
                     if (target !== "" && text.trim() !== "") {
-                      root.runAction([root.cli, "profile", "nickname", target, text.trim()])
+                      root.sessionSend("nickname " + target + " " + text.trim())
                       root.applyProfileChange(target, "rename", text.trim())
                     }
+                    root.renamingIccid = ""
                     text = ""
                   }
                 }
@@ -1455,7 +3709,7 @@ Panel {
                   // The height every other control in this area matches. Left
                   // to size itself; a formula misses the border reserve.
                   id: addBtn
-                  width: (esimCol.width - Style.space(4)) / 2
+                  width: esimCol.width
                   fontSize: Style.font.caption
                   verticalPadding: Style.space(2)
                   iconText: "󰐕"
@@ -1471,18 +3725,6 @@ Panel {
                   }
                 }
 
-                Button {
-                  width: (esimCol.width - Style.space(4)) / 2
-                  fontSize: Style.font.caption
-                  verticalPadding: Style.space(2)
-                  iconText: "󰑐"
-                  text: "Refresh"
-                  tooltipText: "Re-read profiles from the eSIM"
-                  bordered: true
-                  foreground: root.barForeground
-                  fontFamily: root.fontFamily
-                  onClicked: { root.profiles = []; root.loadProfiles() }
-                }
               }
 
               Item {
@@ -1514,6 +3756,7 @@ Panel {
                     onClicked: {
                       root.addingProfile = false
                       root.runDetached(root.cli + " profile scan")
+                      root.profilesStale = true
                     }
                   }
 
@@ -1529,11 +3772,11 @@ Panel {
                     text = ""
                   }
                   onAccepted: {
-                    root.addingProfile = false
                     if (text.trim() !== "") {
-                      root.runAction([root.cli, "profile", "download", text.trim()])
-                      root.profileError = "Downloaded. Refresh to see it."
+                      root.sessionSend("download " + text.trim())
+                      root.profileError = "Downloading…"
                     }
+                    root.addingProfile = false
                     text = ""
                   }
                 }
@@ -1541,6 +3784,7 @@ Panel {
               }
             }
           }
+
 
 
       }
@@ -1588,10 +3832,133 @@ Panel {
     }
   }
 
+  // A bordered settings group: the title interrupts the top border, the
+  // rows sit inside.
+  component TuneGroup: Item {
+    property string title: ""
+    default property alias groupContent: groupInner.data
+    width: parent.width
+    implicitHeight: groupFrame.y + groupFrame.height
+
+    Rectangle {
+      id: groupFrame
+      y: Math.round(groupTitle.implicitHeight / 2)
+      width: parent.width
+      height: groupInner.y - y + groupInner.implicitHeight + Style.space(8)
+      color: "transparent"
+      border.color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.3)
+      border.width: 1
+      radius: Style.cornerRadius
+    }
+
+    Rectangle {
+      x: Style.space(6)
+      y: 0
+      width: groupTitle.implicitWidth + Style.space(6)
+      height: groupTitle.implicitHeight
+      color: Color.popups.background
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      id: groupTitle
+      x: Style.space(9)
+      y: 0
+      text: parent.title
+      color: root.barForeground
+      opacity: 0.55
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+
+    Column {
+      id: groupInner
+      x: Style.space(7)
+      y: groupTitle.implicitHeight + Style.space(3)
+      width: parent.width - Style.space(14)
+      spacing: Style.space(4)
+    }
+  }
+
+  // One settings row: label left, a dropdown right. A pick is staged;
+  // Save applies it.
+  component TuneDrop: Item {
+    property string label: ""
+    property var options: []
+    property string current: ""
+    property string pending: ""
+    property string tuneKey: ""
+    property string verb: "settings"
+    width: parent.width
+    implicitHeight: dropCtl.implicitHeight
+
+    Text {
+      textFormat: Text.PlainText
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      text: parent.label
+      color: root.barForeground
+      opacity: 0.6
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+
+    Dropdown {
+      id: dropCtl
+      anchors.right: parent.right
+      width: Math.round(parent.width * 0.62)
+      showLabel: false
+      rowHeight: root.tuneRowHeight
+      foreground: root.barForeground
+      fontFamily: root.fontFamily
+      options: parent.options
+      value: parent.pending !== "" ? parent.pending : parent.current
+      onChanged: function (v) { parent.pending = v }
+    }
+  }
+
+  // One settings row: label left, a field right, saved on Enter.
+  component TuneField: Item {
+    property string label: ""
+    property string hint: ""
+    property string tuneKey: ""
+    property alias text: tuneInput.text
+    width: parent.width
+    implicitHeight: tuneInput.implicitHeight
+
+    Text {
+      textFormat: Text.PlainText
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      text: parent.label
+      color: root.barForeground
+      opacity: 0.6
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.letterSpacing: 1
+    }
+
+    TextField {
+      id: tuneInput
+      anchors.right: parent.right
+      width: Math.round(parent.width * 0.62)
+      font.pixelSize: Style.font.bodySmall
+      verticalPadding: Math.max(2, Math.round((root.tuneRowHeight - Style.font.bodySmall) / 2) - 2)
+      horizontalAlignment: TextInput.AlignRight
+      placeholderText: parent.hint
+      foreground: root.barForeground
+      enabled: !root.busy
+      onAccepted: root.runAction([root.cli, "settings", parent.tuneKey, text.trim()])
+    }
+  }
+
   component InfoPair: Row {
     property string label: ""
     property string value: ""
     property string copyValue: ""
+    property int size: Style.font.bodySmall
     property color valueColor: root.barForeground
     readonly property bool copyable: copyValue !== ""
 
@@ -1605,7 +3972,7 @@ Panel {
       color: root.barForeground
       opacity: 0.6
       font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: parent.size
     }
 
     // Right-aligned in whatever the label leaves, and elided: operator names
@@ -1620,7 +3987,7 @@ Panel {
       color: parent.valueColor
       opacity: copyArea.containsMouse ? 0.7 : 1
       font.family: root.fontFamily
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: parent.size
 
       MouseArea {
         id: copyArea
