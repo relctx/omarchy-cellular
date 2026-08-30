@@ -385,6 +385,20 @@ Panel {
   property string browseProv: ""
   property var browseRows: []
 
+  function tuneSave() {
+    var cmds = []
+    if (tunePeriodField.text.trim() !== String(info.spark_minutes || ""))
+      cmds.push([cli, "tune", "spark-minutes", tunePeriodField.text.trim()])
+    if (tuneMetricField.text.trim() !== String(info.route_metric || ""))
+      cmds.push([cli, "tune", "route-metric", tuneMetricField.text.trim()])
+    if (tuneOperatorField.text.trim() !== String(info.operator_id || ""))
+      cmds.push([cli, "tune", "operator-id", tuneOperatorField.text.trim()])
+    if (tuneIntervalField.text.trim() !== String(info.poll_interval || ""))
+      cmds.push([cli, "tune", "interval", tuneIntervalField.text.trim()])
+    if (cmds.length === 0) return
+    runAction(cmds[0], cmds.slice(1))
+  }
+
   function browseLoad() {
     browseRows = []
     var cmd = [cli, "carrier", "list"]
@@ -807,9 +821,13 @@ Panel {
   // clear their own input can keep it instead of losing it.
   property var actionFollow: []
   property string pendingSettle: ""
+  // `follow` is one command or a list of commands, run in order after this
+  // one succeeds.
   function runAction(cmd, follow) {
     if (actionProc.running) return false
-    root.actionFollow = follow || []
+    var q = follow || []
+    if (q.length > 0 && typeof q[0] === "string") q = [q]
+    root.actionFollow = q
     root.busyLabel = root.labelFor(cmd)
     root.busyVerb = cmd[1] === "sh" ? "" : (cmd[1] || "")
     actionProc.command = ["env", "OMARCHY_CELLULAR_QUIET=1"].concat(cmd)
@@ -899,7 +917,10 @@ Panel {
       // and the refresh waits for the end of the chain.
       var follow = root.actionFollow
       root.actionFollow = []
-      if (code === 0 && follow.length > 0) { root.runAction(follow); return }
+      if (code === 0 && follow.length > 0) {
+        root.runAction(follow[0], follow.slice(1))
+        return
+      }
       if (root.pendingSettle !== "") {
         var settleArg = root.pendingSettle
         root.pendingSettle = ""
@@ -2722,10 +2743,38 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          PanelSectionHeader {
-            text: "SETTINGS"
-            foreground: root.barForeground
-            fontFamily: root.fontFamily
+          Item {
+            width: parent.width
+            implicitHeight: tuneHeader.implicitHeight
+
+            PanelSectionHeader {
+              id: tuneHeader
+              text: "SETTINGS"
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              anchors.left: parent.left
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.baseline: tuneHeader.baseline
+              text: "Save"
+              color: root.barForeground
+              opacity: saveArea.containsMouse && !root.busy ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                id: saveArea
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                cursorShape: root.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
+                enabled: !root.busy
+                onClicked: root.tuneSave()
+              }
+            }
           }
 
           TuneGroup {
