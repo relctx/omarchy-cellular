@@ -2195,7 +2195,7 @@ migrate() {
     # one action an upgrade may need.
     local note="What changed:"$'\n'"github.com/relctx/omarchy-cellular/releases"
     [[ $(esim_transport) == none ]] &&
-      note+=$'\n'"eSIM needs lpac-git:"$'\n'"yay -S lpac-git"
+      note+=$'\n'"eSIM needs lpac-git:  yay -S lpac-git"
     omarchy-notification-send -g "󰢾" -u critical "Cellular updated to $cur" "$note" 2>/dev/null ||
       notify-send -u critical "Cellular updated to $cur" "$note" 2>/dev/null
   fi
