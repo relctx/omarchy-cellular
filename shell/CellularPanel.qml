@@ -2906,7 +2906,7 @@ Panel {
 
             TuneField {
               id: tunePeriodField
-              label: "CHART PERIOD (MIN)"
+              label: "PERIOD (MIN)"
               hint: "5"
               tuneKey: "spark-minutes"
             }
