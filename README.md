@@ -1,8 +1,9 @@
 # omarchy-cellular
 
 A cellular plugin for [Omarchy](https://omarchy.org/). It adds a bar widget with a
-control panel, and a CLI. NetworkManager, ModemManager and busctl do the work of managing
-the modem.
+control panel, and a CLI. NetworkManager and ModemManager do the work of managing the
+modem, read over the bus; lpac handles eSIM profiles and qmicli the deep diagnostics,
+each through its proxy on the modem's own control port.
 
 <table>
 <tr valign="top">
@@ -48,8 +49,9 @@ omarchy pkg add zbar        # QR scan; codes can still be typed without it
 omarchy pkg add libqmi      # optional: qmicli, for `cells` diagnostics
 ```
 
-`lpac` talks to the eUICC over the modem's MBIM port, which ModemManager keeps open,
-so eSIM operations do not interrupt the connection. `omarchy-cellular doctor` reports
+`lpac` talks to the eUICC over the modem's control port — MBIM or QMI, matching what
+the modem exposes — which ModemManager keeps open, so eSIM operations do not interrupt
+the connection. `omarchy-cellular doctor` reports
 what is installed.
 
 ## Hardware
@@ -57,11 +59,11 @@ what is installed.
 Developed against a Lenovo ThinkPad X1 Carbon Gen 12 with a Quectel RM520N-GL (5G,
 MHI/PCIe). USB modems should work, but have not been tested.
 
-Two code paths depend on the bus. MBIM port discovery reads `/sys/class/wwan`, where the
-kernel labels each port by function, and falls back to ModemManager's port list on USB
-modems older than the wwan subsystem. Control-port recovery after suspend re-authorizes
-the USB device to force a re-probe, and returns early on PCIe, where there is no
-`cdc-wdm` node.
+Two code paths depend on the hardware. Control-port discovery reads the captured
+modem's own port list — MBIM preferred, QMI honored — with a `/sys/class/wwan` scan
+only as the fallback while the modem object is absent. Control-port recovery after
+suspend re-authorizes the USB device to force a re-probe, and returns early on PCIe,
+where there is no `cdc-wdm` node.
 
 ## Panel
 
@@ -85,7 +87,12 @@ happen, and a SIM switch narrates its stages instead of holding one spinner.
   profile — as tiles; one click switches, whatever that takes underneath. eSIM
   management lists profiles by ICCID with rename, delete and install.
 - **Cell diagnostics**: read on demand — every carrier in use (primary and secondaries
-  with their widths, carrier aggregation totalled) and every cell the radio hears.
+  with their widths, carrier aggregation totaled) and every cell the radio hears.
+- **Messages**: carrier texts read, notified on arrival, and deleted — most of what a
+  data SIM ever receives. The store is the modem's own memory.
+
+The widget's settings (poll interval, sparkline, message notifications) are in
+Omarchy's bar widget settings.
 
 eSIM operations run over MBIM with the connection up. One authorization covers a whole
 management session.
@@ -112,6 +119,10 @@ omarchy-cellular apn list            APNs on the carrier's bearers
 omarchy-cellular pin ...             SIM lock: status, unlock, puk, on|off, change
 omarchy-cellular signal              every metric the modem reports, RSRQ included
 omarchy-cellular cells               carriers in use and every cell heard
+omarchy-cellular sms [delete <id>]   read or delete stored text messages
+omarchy-cellular devices             every modem present; * marks the one driven
+omarchy-cellular device <port|auto>  drive one modem, disable the rest
+omarchy-cellular at '<command>'      one AT command, manual diagnostics only
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
 omarchy-cellular metered [yes|no]      whether this connection costs money
@@ -188,7 +199,7 @@ default via 192.168.1.1  dev wlan0    metric 600   <- traffic goes here
 default via 10.0.0.1     dev wwan0    metric 700
 ```
 
-Failover is immediate, because the modem holds its connection instead of dialling on
+Failover is immediate, because the modem holds its connection instead of dialing on
 demand. `ROUTE_METRIC` sets the cellular metric, and 700 is the default.
 
 `omarchy-cellular prefer cellular` puts mobile first. The metric is computed from the routes
