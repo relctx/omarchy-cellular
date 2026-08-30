@@ -154,8 +154,11 @@ Panel {
     }
 
     root.profilesUndo = []
-    // The change landed. The authoritative list costs nothing now.
+    // The change landed. The authoritative list costs nothing now, and the
+    // main feed re-reads so the card list and identity follow immediately
+    // instead of waiting out the poll interval.
     root.sessionSend("list")
+    root.opened ? root.refreshDetails() : root.refresh()
   }
 
   function loadProfiles() {
