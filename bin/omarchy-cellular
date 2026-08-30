@@ -1226,14 +1226,17 @@ cmd_signal() {
   done
   ((any)) || echo "  nothing reported"
 
-  local dev
-  dev=$(mbim_port) && dev_node_ok "$dev" || return 0
+  local t drv dev mflag=""
+  t=$(ctl_transport) || return 0
+  drv=${t%% *}
+  dev=${t#* }
+  [[ $drv == mbim ]] && mflag=--device-open-mbim
   command -v qmicli >/dev/null || return 0
 
   echo
   echo "Modem (needs authorization):"
   local out
-  out=$(pkexec qmicli --device="$dev" --device-open-mbim --device-open-proxy \
+  out=$(pkexec qmicli --device="$dev" ${mflag:+"$mflag"} --device-open-proxy \
     --nas-get-signal-info 2>/dev/null) || {
     echo "  unavailable — the modem did not answer." >&2
     return 0
@@ -1719,23 +1722,26 @@ cmd_cells() {
     echo "Cell diagnostics need qmicli (libqmi), which is not installed." >&2
     return 1
   }
-  local dev
-  dev=$(mbim_port) && dev_node_ok "$dev" || {
-    echo "This modem exposes no MBIM port." >&2
+  local t drv dev mflag=""
+  t=$(ctl_transport) || {
+    echo "This modem exposes no MBIM or QMI control port." >&2
     return 1
   }
+  drv=${t%% *}
+  dev=${t#* }
+  [[ $drv == mbim ]] && mflag=--device-open-mbim
 
   local raw
   raw=$(pkexec sh -c '
-    dev=$1
-    timeout 30 qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-rf-band-info 2>/dev/null
+    dev=$1 mflag=$2
+    timeout 30 qmicli --device="$dev" $mflag --device-open-proxy --nas-get-rf-band-info 2>/dev/null
     echo "===CELLS==="
-    timeout 30 qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-cell-location-info 2>/dev/null
+    timeout 30 qmicli --device="$dev" $mflag --device-open-proxy --nas-get-cell-location-info 2>/dev/null
     echo "===CA==="
     # LTE-only; on an NR camp it fails, and that is data, not an error.
-    timeout 30 qmicli --device="$dev" --device-open-mbim --device-open-proxy --nas-get-lte-cphy-ca-info 2>/dev/null
+    timeout 30 qmicli --device="$dev" $mflag --device-open-proxy --nas-get-lte-cphy-ca-info 2>/dev/null
     exit 0
-  ' sh "$dev") || return 1
+  ' sh "$dev" "$mflag") || return 1
   [[ -n $raw ]] || {
     echo "The modem did not answer." >&2
     return 1
@@ -2479,11 +2485,12 @@ qmi_port() {
   return 1
 }
 
-# Which lpac APDU driver reaches this modem's eUICC, and through which
-# device: "mbim /dev/..." or "qmi /dev/...". MBIM is preferred; QMI serves
-# modems that expose only a QMI control port. Both go through the
-# respective proxy, so ModemManager keeps the port.
-lpa_transport() {
+# The captured modem's control port and its protocol: "mbim /dev/..." or
+# "qmi /dev/...". MBIM is preferred; QMI serves modems that expose only a
+# QMI control port. Everything that opens the port directly (lpac, qmicli)
+# derives its transport from this, through the matching proxy, so
+# ModemManager keeps the port.
+ctl_transport() {
   local dev
   if dev=$(mbim_port 2>/dev/null) && dev_node_ok "$dev"; then
     printf 'mbim %s' "$dev"
@@ -2539,7 +2546,7 @@ esim_transport() {
   have_lpa || { printf 'none'; return 0; }
 
   local t drv
-  t=$(lpa_transport) || { printf 'none'; return 0; }
+  t=$(ctl_transport) || { printf 'none'; return 0; }
   drv=${t%% *}
 
   # The driver probe spawns lpac; cache its answer per binary and driver.
@@ -2602,7 +2609,7 @@ esim_run() {
       echo "$LPA_HINT" >&2
       return 1
     }
-    t=$(lpa_transport) || {
+    t=$(ctl_transport) || {
       echo "This modem exposes no MBIM or QMI control port, which eSIM management needs." >&2
       return 1
     }
@@ -2614,7 +2621,7 @@ esim_run() {
       return 1
     }
   else
-    if t=$(lpa_transport 2>/dev/null); then
+    if t=$(ctl_transport 2>/dev/null); then
       drv=${t%% *}
       dev=${t#* }
     fi
@@ -2819,7 +2826,7 @@ cmd_esim_session() {
   profile_precheck || return 1
 
   local dev slot drv t
-  t=$(lpa_transport) || {
+  t=$(ctl_transport) || {
     echo "This modem exposes no MBIM or QMI control port." >&2
     return 1
   }
