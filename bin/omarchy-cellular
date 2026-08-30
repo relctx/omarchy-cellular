@@ -577,8 +577,12 @@ read_state() {
 
   dump=$(modem_dump "$idx")
   OPERATOR=$(kv "$dump" modem.3gpp.operator-name)
-  # access-technologies is a list, even when the modem reports just one.
-  TECH=$(kv "$dump" "modem.generic.access-technologies.value[1]" | tr '[:lower:]' '[:upper:]')
+  # access-technologies is a list: two entries on NSA 5G (the LTE anchor and
+  # the NR leg), one otherwise. Show all of them.
+  TECH=$(awk -F' *: *' '
+    $1 ~ /^modem\.generic\.access-technologies\.value\[/ && $2 != "--" {
+      v = (v == "" ? $2 : v " + " $2)
+    } END { print toupper(v) }' <<<"$dump")
   SIGNAL=$(kv "$dump" modem.generic.signal-quality.value)
   SIGNAL=${SIGNAL:-0}
 
