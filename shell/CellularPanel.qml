@@ -248,6 +248,7 @@ Panel {
   property var rsrpHistory: []
   property string sparkMetric: ""
   readonly property bool sparkOff: info.spark_metric === "off"
+  readonly property bool sparkPinned: info.spark_metric === "snr" || info.spark_metric === "signal"
   readonly property int sparkMinutes: {
     var m = parseInt(info.spark_minutes)
     return m >= 1 ? m : 5
@@ -1399,9 +1400,13 @@ Panel {
           id: sparkCol
           // Stays visible once a metric exists: an empty chart during a
           // sample gap beats the whole section reflowing in and out.
+          // A pinned metric keeps the chart on screen from the moment it
+          // is chosen — empty until samples arrive. Auto still waits for a
+          // first metric so a modem with no signal data shows no chart.
           visible: root.hwPresent && root.setting("sparkline", true)
                    && (root.sparkOff ? root.mgmtView !== ""
-                       : (root.rsrpHistory.length >= 2 || root.sparkMetric !== ""))
+                       : (root.sparkPinned || root.rsrpHistory.length >= 2
+                          || root.sparkMetric !== ""))
           width: parent.width
           spacing: Style.space(2)
 
@@ -1429,7 +1434,9 @@ Panel {
               textFormat: Text.PlainText
               id: sparkTitle
               anchors.left: parent.left
-              text: (root.sparkMetric || "RSRP") + " · LAST " + root.sparkMinutes + " MIN"
+              text: (root.sparkMetric
+                     || (root.sparkPinned ? root.info.spark_metric.toUpperCase() : "RSRP"))
+                    + " · LAST " + root.sparkMinutes + " MIN"
               color: root.barForeground
               opacity: 0.5
               font.family: root.fontFamily
