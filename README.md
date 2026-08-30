@@ -28,8 +28,9 @@ ln -sf ~/.config/omarchy/plugins/relctx.cellular/bin/omarchy-cellular ~/.local/b
 
 Omarchy 4.0 (quattro) or newer. The widget targets the Quickshell-based omarchy-shell.
 
-eSIM profile management needs lpac built with the `mbim` driver — the `lpac-git`
-package is, the stock `lpac` package is not:
+eSIM profile management needs lpac built with the driver matching the modem's
+control port — `mbim` normally, `qmi` for modems that expose only a QMI port.
+The `lpac-git` package has both, the stock `lpac` package has neither:
 
 ```sh
 yay -S lpac-git

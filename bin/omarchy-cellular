@@ -2460,6 +2460,34 @@ mbim_port() {
   return 1
 }
 
+# The captured modem's QMI control port, for modems with no MBIM port.
+qmi_port() {
+  local idx n d
+  idx=$(modem_index)
+  [[ -n $idx ]] || return 1
+  d=$(modem_dump "$idx") || return 1
+  n=$(sed -n 's|^[[:space:]]*modem\.generic\.ports\.value\[[0-9]*\][[:space:]]*:[[:space:]]*\([^ ]*\) (qmi)$|\1|p' <<<"$d" | head -1)
+  [[ -n $n && -c /dev/$n ]] && { printf '/dev/%s' "$n"; return 0; }
+  return 1
+}
+
+# Which lpac APDU driver reaches this modem's eUICC, and through which
+# device: "mbim /dev/..." or "qmi /dev/...". MBIM is preferred; QMI serves
+# modems that expose only a QMI control port. Both go through the
+# respective proxy, so ModemManager keeps the port.
+lpa_transport() {
+  local dev
+  if dev=$(mbim_port 2>/dev/null) && dev_node_ok "$dev"; then
+    printf 'mbim %s' "$dev"
+    return 0
+  fi
+  if dev=$(qmi_port 2>/dev/null) && dev_node_ok "$dev"; then
+    printf 'qmi %s' "$dev"
+    return 0
+  fi
+  return 1
+}
+
 # Which slot holds the eUICC. Only an eUICC has an EID, so a slot whose SIM
 # reports one is the eSIM; sim-type would say so directly but plenty of modems
 # leave it "--", this one included. Prints the slot number, or fails when no
@@ -2502,22 +2530,25 @@ lpac_has_driver() {
 esim_transport() {
   have_lpa || { printf 'none'; return 0; }
 
-  mbim_port >/dev/null 2>&1 || { printf 'none'; return 0; }
+  local t drv
+  t=$(lpa_transport) || { printf 'none'; return 0; }
+  drv=${t%% *}
 
+  # The driver probe spawns lpac; cache its answer per binary and driver.
   local bin stamp cache
   bin=$(command -v lpac)
-  stamp=$(stat -c '%Y:%s' "$bin" 2>/dev/null) || stamp=unknown
-  cache="$STATE_DIR/lpac-mbim"
+  stamp="$(stat -c '%Y:%s' "$bin" 2>/dev/null || echo unknown):$drv"
+  cache="$STATE_DIR/lpac-driver"
 
   if [[ -s $cache && $(sed -n 1p "$cache" 2>/dev/null) == "$stamp" ]]; then
-    [[ $(sed -n 2p "$cache" 2>/dev/null) == yes ]] && printf 'mbim' || printf 'none'
+    [[ $(sed -n 2p "$cache" 2>/dev/null) == yes ]] && printf '%s' "$drv" || printf 'none'
     return 0
   fi
 
   mkdir -p "$STATE_DIR" 2>/dev/null
-  if lpac_has_driver mbim; then
+  if lpac_has_driver "$drv"; then
     printf '%s\nyes\n' "$stamp" >"$cache" 2>/dev/null
-    printf 'mbim'
+    printf '%s' "$drv"
   else
     printf '%s\nno\n' "$stamp" >"$cache" 2>/dev/null
     printf 'none'
@@ -2555,7 +2586,7 @@ esim_run() {
 
   # With no lpac command this is a slot switch and nothing more, so none of
   # the eUICC machinery has to be present for it to work.
-  local dev=""
+  local dev="" drv="" t
   if (($#)); then
     need_jq || return 1
     have_lpa || {
@@ -2563,18 +2594,22 @@ esim_run() {
       echo "$LPA_HINT" >&2
       return 1
     }
-    dev=$(mbim_port) && dev_node_ok "$dev" || {
-      echo "This modem exposes no MBIM port, which eSIM management needs." >&2
+    t=$(lpa_transport) || {
+      echo "This modem exposes no MBIM or QMI control port, which eSIM management needs." >&2
       return 1
     }
-    lpac_has_driver mbim || {
-      echo "This lpac has no mbim driver, so it cannot reach the eUICC." >&2
+    drv=${t%% *}
+    dev=${t#* }
+    lpac_has_driver "$drv" || {
+      echo "This lpac has no $drv driver, so it cannot reach the eUICC." >&2
       echo "$LPA_HINT" >&2
       return 1
     }
   else
-    dev=$(mbim_port 2>/dev/null) || dev=""
-    [[ -n $dev ]] && { dev_node_ok "$dev" || dev=""; }
+    if t=$(lpa_transport 2>/dev/null); then
+      drv=${t%% *}
+      dev=${t#* }
+    fi
   fi
 
   # Two of these overlapping would have one switching the slot while the other
@@ -2586,8 +2621,8 @@ esim_run() {
 
   local out rc
   out=$(pkexec sh -c '
-    dev=$1 want=$2 withlist=$3
-    shift 3
+    dev=$1 want=$2 withlist=$3 drv=$4
+    shift 4
 
     modem_idx() {
       timeout 10 mmcli -L 2>/dev/null | sed -n "s|.*/Modem/\([0-9]\{1,\}\).*|\1|p" | head -1
@@ -2620,6 +2655,12 @@ esim_run() {
             sim=$(timeout 10 mmcli -m "$idx" -K 2>/dev/null |
               sed -n "s/^[[:space:]]*modem\.generic\.sim[[:space:]]*:[[:space:]]*//p" | head -1)
             case $sim in */SIM/*) ok=1; break ;; esac
+          elif [ "$drv" = qmi ]; then
+            if timeout 15 qmicli --device="$dev" --device-open-proxy \
+              --uim-get-card-status >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
           elif mbimcli --device="$dev" --device-open-proxy \
             --query-subscriber-ready-status >/dev/null 2>&1; then
             ok=1
@@ -2637,15 +2678,20 @@ esim_run() {
 
     [ "$#" -gt 0 ] || exit 0
 
-    export LPAC_APDU=mbim LPAC_APDU_MBIM_DEVICE="$dev" \
-      LPAC_APDU_MBIM_UIM_SLOT="$want" LPAC_APDU_MBIM_USE_PROXY=1
+    if [ "$drv" = qmi ]; then
+      export LPAC_APDU=qmi LPAC_APDU_QMI_DEVICE="$dev" \
+        LPAC_APDU_QMI_UIM_SLOT="$want"
+    else
+      export LPAC_APDU=mbim LPAC_APDU_MBIM_DEVICE="$dev" \
+        LPAC_APDU_MBIM_UIM_SLOT="$want" LPAC_APDU_MBIM_USE_PROXY=1
+    fi
 
     lpac "$@" || exit 14
     if [ "$withlist" = 1 ]; then
       printf "\n%s\n" "===LPAC-LIST==="
       lpac profile list
     fi
-  ' sh "$dev" "$want" "$withlist" "$@")
+  ' sh "$dev" "$want" "$withlist" "$drv" "$@")
   rc=$?
 
   flock -u "$lock" 2>/dev/null || true
@@ -2764,13 +2810,15 @@ activation_code_ok() {
 cmd_esim_session() {
   profile_precheck || return 1
 
-  local dev slot
-  dev=$(mbim_port) && dev_node_ok "$dev" || {
-    echo "This modem exposes no MBIM port." >&2
+  local dev slot drv t
+  t=$(lpa_transport) || {
+    echo "This modem exposes no MBIM or QMI control port." >&2
     return 1
   }
-  lpac_has_driver mbim || {
-    echo "This lpac has no mbim driver." >&2
+  drv=${t%% *}
+  dev=${t#* }
+  lpac_has_driver "$drv" || {
+    echo "This lpac has no $drv driver." >&2
     return 1
   }
   slot=$(esim_slot) || {
@@ -2788,9 +2836,14 @@ cmd_esim_session() {
 
   coproc PRIV {
     pkexec sh -c '
-      dev=$1 slot=$2 idle=$3
-      export LPAC_APDU=mbim LPAC_APDU_MBIM_DEVICE="$dev" \
-        LPAC_APDU_MBIM_UIM_SLOT="$slot" LPAC_APDU_MBIM_USE_PROXY=1
+      dev=$1 slot=$2 idle=$3 drv=$4
+      if [ "$drv" = qmi ]; then
+        export LPAC_APDU=qmi LPAC_APDU_QMI_DEVICE="$dev" \
+          LPAC_APDU_QMI_UIM_SLOT="$slot"
+      else
+        export LPAC_APDU=mbim LPAC_APDU_MBIM_DEVICE="$dev" \
+          LPAC_APDU_MBIM_UIM_SLOT="$slot" LPAC_APDU_MBIM_USE_PROXY=1
+      fi
       while IFS=" " read -r -t "$idle" verb rest; do
         out="" rc=0
         case $verb in
@@ -2810,7 +2863,7 @@ cmd_esim_session() {
         esac
         printf "%s\n===END %s===\n" "$out" "$rc"
       done
-    ' sh "$dev" "$slot" "$ESIM_SESSION_IDLE"
+    ' sh "$dev" "$slot" "$ESIM_SESSION_IDLE" "$drv"
   } 2>/dev/null
 
   # A write to the privileged half after it exits would otherwise kill this
