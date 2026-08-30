@@ -2872,7 +2872,7 @@ Panel {
           }
 
           TuneGroup {
-            title: "PANEL"
+            title: "STATS PANEL"
 
             TuneField {
               id: tuneIntervalField
