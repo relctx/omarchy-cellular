@@ -44,8 +44,8 @@ For anyone coming from the 1.0.x marketplace build:
   the others and moves the connection with it. CLI: `devices`, `device`.
 - **Self-migration**: the first run after an update carries old settings forward,
   cleans retired state, and posts one notification.
-- **Removed**: carrier code (USSD) sending, which ModemManager cannot do over
-  MBIM, and the menu-based pickers the panel replaced.
+- **Removed**: the menu-based carrier and APN pickers, replaced by the panel's
+  inline browser and APN field.
 
 ## Install
 
