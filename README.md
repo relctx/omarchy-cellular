@@ -127,9 +127,8 @@ happen, and a SIM switch reports each stage instead of holding one spinner.
 - **Management chips**: device details, SIM cards, APN and carrier, cell diagnostics,
   messages. One box opens at a time. Settings sits apart on the right.
 
-The bar widget's own settings (default poll interval, sparkline enable, message
-notifications) are in Omarchy's bar widget settings; a `settings` value overrides where
-both exist.
+The bar widget's own settings (default poll interval, message notifications) are
+in Omarchy's bar widget settings; a `settings` value overrides where both exist.
 
 <br clear="both">
 

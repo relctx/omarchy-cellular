@@ -1441,7 +1441,7 @@ Panel {
           // first metric so a modem with no signal data shows no chart.
           // Chartless presets surface this section only in focus mode,
           // where it is the full-width stat strip.
-          visible: root.hwPresent && root.setting("sparkline", true)
+          visible: root.hwPresent
                    && (root.chartless ? root.mgmtView !== ""
                        : (root.sparkPinned || root.rsrpHistory.length >= 2
                           || root.sparkMetric !== ""))

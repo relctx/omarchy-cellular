@@ -20,21 +20,14 @@
     "defaultSection": "right",
     "defaults": {
       "interval": 60,
-      "sparkline": true,
       "smsNotify": true
     },
     "schema": [
       {
         "key": "interval",
         "type": "number",
-        "label": "Fallback refresh seconds (events drive updates; this is the safety net)",
+        "label": "Fallback refresh seconds (the panel's Idle poll setting overrides this)",
         "defaultValue": 60
-      },
-      {
-        "key": "sparkline",
-        "type": "boolean",
-        "label": "Show the signal history sparkline",
-        "defaultValue": true
       },
       {
         "key": "smsNotify",
