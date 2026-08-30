@@ -3146,7 +3146,7 @@ Panel {
               anchors.verticalCenterOffset: Math.round(simHeader.topPadding / 2)
               text: root.esimExpanded ? "Close eSIM management" : "Manage eSIM…"
               color: root.barForeground
-              opacity: !root.esimSelected || !root.lpaReady ? 0.35
+              opacity: !root.esimSelected ? 0.35
                        : manageArea.containsMouse || root.esimExpanded ? 1 : 0.6
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -3158,9 +3158,9 @@ Panel {
                 // Hover stays live while the control is unavailable, so the
                 // tooltip can say why; only the click is gated.
                 hoverEnabled: true
-                cursorShape: root.esimSelected && root.lpaReady ? Qt.PointingHandCursor : Qt.ArrowCursor
+                cursorShape: root.esimSelected ? Qt.PointingHandCursor : Qt.ArrowCursor
                 onClicked: {
-                  if (!root.esimSelected || !root.lpaReady) return
+                  if (!root.esimSelected) return
                   root.esimExpanded = !root.esimExpanded
                   if (root.esimExpanded) root.loadProfiles()
                   else root.sessionStop()
