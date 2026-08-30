@@ -26,7 +26,8 @@ For anyone coming from the 1.0.x marketplace build:
   `lpac-git` provides itself):
 
   ```sh
-  yay -Rns lpac libeuicc
+  yay -Rns lpac            # takes libeuicc with it
+  yay -Rns lpac-debug      # if present; it blocks lpac-git's debug package
   yay -S lpac-git
   ```
 
