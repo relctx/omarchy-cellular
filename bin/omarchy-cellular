@@ -2269,6 +2269,7 @@ cmd_panel() {
   cmd_sims 2>/dev/null
   printf 'apn=%s\n' "$(get_cfg APN)"
   printf 'metered=%s\n' "$(get_cfg METERED | grep . || echo yes)"
+  printf 'allow_roaming=%s\n' "$(get_cfg ALLOW_ROAMING | grep . || echo yes)"
   printf 'prefer_cellular=%s\n' "$([[ $(get_cfg PREFER_CELLULAR) == yes ]] && echo yes || echo no)"
   printf 'route_via=%s\n' "$(route_via)"
 
@@ -3663,6 +3664,23 @@ metered)
   echo "Marked $(get_cfg METERED)."
   ;;
 
+roaming)
+  case "${2:-}" in
+  yes | on) set_cfg ALLOW_ROAMING yes ;;
+  no | off) set_cfg ALLOW_ROAMING no ;;
+  "")
+    echo "Configured: $(get_cfg ALLOW_ROAMING | grep . || echo yes)"
+    exit 0
+    ;;
+  *)
+    echo "usage: omarchy-cellular roaming [yes|no]" >&2
+    exit 2
+    ;;
+  esac
+  nm_apply || exit 1
+  echo "Roaming $(get_cfg ALLOW_ROAMING | grep . || echo yes)."
+  ;;
+
 prefer)
   case "${2:-}" in
   cellular) set_cfg PREFER_CELLULAR yes ;;
@@ -3769,6 +3787,7 @@ usage: omarchy-cellular <command>
   apn list            APNs the carrier provisioned into the modem
   autoconnect on|off  connect automatically at boot
   prefer [cellular|wifi]  which link carries traffic when both are up
+  roaming [yes|no]    allow or forbid data on foreign networks
   metered [yes|no]    tell other software this connection costs money
   log                 recent connection log
   doctor              verify the patch is still fully in place

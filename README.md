@@ -126,6 +126,7 @@ omarchy-cellular at '<command>'      one AT command, manual diagnostics only
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
 omarchy-cellular metered [yes|no]      whether this connection costs money
+omarchy-cellular roaming [yes|no]      allow data on foreign networks
 omarchy-cellular identify            re-read ICCID and EID
 omarchy-cellular apply               re-read cellular.conf and reconnect
 omarchy-cellular config              edit ~/.config/omarchy/cellular.conf

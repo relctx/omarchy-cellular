@@ -773,6 +773,7 @@ Panel {
     if (verb === "apply") return "Applying…"
     if (verb === "carrier") return cmd[2] === "auto" ? "Detecting carrier…" : "Setting carrier…"
     if (verb === "autoconnect") return "Saving…"
+    if (verb === "roaming") return "Saving…"
     if (verb === "profile") return "Updating the eSIM…"
     if (verb === "-c") return "Detecting carrier…"
     return "Working…"
@@ -1531,6 +1532,17 @@ Panel {
               : "Nothing defers downloads; the data cap still applies"
             onFlipped: root.runAction([root.cli, "metered",
                                        root.info.metered === "yes" ? "no" : "yes"])
+          }
+
+          SwitchRow {
+            width: parent.width
+            label: "ALLOW ROAMING"
+            checked: root.info.allow_roaming === "yes"
+            tip: root.info.allow_roaming === "yes"
+              ? "Data may use foreign networks; roaming rates can apply"
+              : "Data only on the home network"
+            onFlipped: root.runAction([root.cli, "roaming",
+                                       root.info.allow_roaming === "yes" ? "no" : "yes"])
           }
 
           SwitchRow {
