@@ -1114,8 +1114,14 @@ Panel {
 
     // Signal-strength samples arrive every few seconds while polling is
     // armed. They only matter when the panel is open; refreshing the bar
-    // for each would out-poll the polling this feed replaces.
-    if (line.indexOf(".Signal',") !== -1 || line.indexOf("SignalQuality") !== -1) {
+    // for each would out-poll the polling this feed replaces. Test for the
+    // property-change signal itself, not for the words alone: an
+    // InterfacesAdded payload carries the modem's entire property
+    // dictionary, SignalQuality included, and a modem arriving on the bus is
+    // precisely the event this must not swallow.
+    if (line.indexOf("PropertiesChanged") !== -1
+        && (line.indexOf(".Signal',") !== -1
+            || line.indexOf("SignalQuality") !== -1)) {
       if (root.opened) eventDebounce.restart()
       return
     }
