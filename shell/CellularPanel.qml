@@ -1101,6 +1101,17 @@ Panel {
       else if (line.indexOf("{'State': <11>}") !== -1)
         busyLabel = "Switching SIM — connected"
     }
+    // Wi-Fi scan chatter, which the NetworkManager monitor subscribes to
+    // along with everything else on that bus: a Strength and LastSeen sample
+    // per visible access point, the rewritten AccessPoints list, LastScan.
+    // None of it concerns the modem, and a crowded office emits it in bursts
+    // every few seconds -- enough to out-poll the polling this feed replaces.
+    // Wi-Fi actually coming or going still arrives here, as Device.State and
+    // ActiveConnection, so failover still repaints immediately.
+    if (line.indexOf("/NetworkManager/AccessPoint/") !== -1
+        || line.indexOf(".Device.Wireless") !== -1)
+      return
+
     // Signal-strength samples arrive every few seconds while polling is
     // armed. They only matter when the panel is open; refreshing the bar
     // for each would out-poll the polling this feed replaces.
