@@ -1103,10 +1103,27 @@ Panel {
       else if (line.indexOf("{'State': <11>}") !== -1)
         busyLabel = "Switching SIM — connected"
     }
+    // Wi-Fi scan chatter, which the NetworkManager monitor subscribes to
+    // along with everything else on that bus: a Strength and LastSeen sample
+    // per visible access point, the rewritten AccessPoints list, LastScan.
+    // None of it concerns the modem, and a crowded office emits it in bursts
+    // every few seconds -- enough to out-poll the polling this feed replaces.
+    // Wi-Fi actually coming or going still arrives here, as Device.State and
+    // ActiveConnection, so failover still repaints immediately.
+    if (line.indexOf("/NetworkManager/AccessPoint/") !== -1
+        || line.indexOf(".Device.Wireless") !== -1)
+      return
+
     // Signal-strength samples arrive every few seconds while polling is
     // armed. They only matter when the panel is open; refreshing the bar
-    // for each would out-poll the polling this feed replaces.
-    if (line.indexOf(".Signal',") !== -1 || line.indexOf("SignalQuality") !== -1) {
+    // for each would out-poll the polling this feed replaces. Test for the
+    // property-change signal itself, not for the words alone: an
+    // InterfacesAdded payload carries the modem's entire property
+    // dictionary, SignalQuality included, and a modem arriving on the bus is
+    // precisely the event this must not swallow.
+    if (line.indexOf("PropertiesChanged") !== -1
+        && (line.indexOf(".Signal',") !== -1
+            || line.indexOf("SignalQuality") !== -1)) {
       if (root.opened) eventDebounce.restart()
       return
     }
