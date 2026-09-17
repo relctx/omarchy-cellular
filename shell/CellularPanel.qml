@@ -251,6 +251,7 @@ Panel {
   // hidden. Focus mode always shows the split (or the full-width strip on
   // chartless presets), whatever the resting choice.
   readonly property string displayMode: info.stats || "full"
+  readonly property bool showUsage: (info.show_usage || "yes") !== "no"
   readonly property bool chartless: displayMode === "stats" || displayMode === "hidden"
   readonly property bool sparkSplit: mgmtView !== "" || displayMode === "compact"
   readonly property bool sparkPinned: info.spark_metric === "snr" || info.spark_metric === "signal"
@@ -320,6 +321,7 @@ Panel {
       tuneMetricDrop.pending = ""
       tuneStatsDrop.pending = ""
       tuneSmsDrop.pending = ""
+      tuneUsageDrop.pending = ""
       tuneIpDrop.pending = ""
       tuneDeviceDrop.pending = ""
       tuneMetricField.text = info.route_metric || ""
@@ -409,7 +411,7 @@ Panel {
 
   function tuneSave() {
     var cmds = []
-    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneSmsDrop, tuneDeviceDrop]
+    var drops = [tuneMetricDrop, tuneIpDrop, tuneStatsDrop, tuneUsageDrop, tuneSmsDrop, tuneDeviceDrop]
     for (var i = 0; i < drops.length; i++) {
       var d = drops[i]
       if (d.pending !== "" && d.pending !== d.current)
@@ -1101,10 +1103,27 @@ Panel {
       else if (line.indexOf("{'State': <11>}") !== -1)
         busyLabel = "Switching SIM — connected"
     }
+    // Wi-Fi scan chatter, which the NetworkManager monitor subscribes to
+    // along with everything else on that bus: a Strength and LastSeen sample
+    // per visible access point, the rewritten AccessPoints list, LastScan.
+    // None of it concerns the modem, and a crowded office emits it in bursts
+    // every few seconds -- enough to out-poll the polling this feed replaces.
+    // Wi-Fi actually coming or going still arrives here, as Device.State and
+    // ActiveConnection, so failover still repaints immediately.
+    if (line.indexOf("/NetworkManager/AccessPoint/") !== -1
+        || line.indexOf(".Device.Wireless") !== -1)
+      return
+
     // Signal-strength samples arrive every few seconds while polling is
     // armed. They only matter when the panel is open; refreshing the bar
-    // for each would out-poll the polling this feed replaces.
-    if (line.indexOf(".Signal',") !== -1 || line.indexOf("SignalQuality") !== -1) {
+    // for each would out-poll the polling this feed replaces. Test for the
+    // property-change signal itself, not for the words alone: an
+    // InterfacesAdded payload carries the modem's entire property
+    // dictionary, SignalQuality included, and a modem arriving on the bus is
+    // precisely the event this must not swallow.
+    if (line.indexOf("PropertiesChanged") !== -1
+        && (line.indexOf(".Signal',") !== -1
+            || line.indexOf("SignalQuality") !== -1)) {
       if (root.opened) eventDebounce.restart()
       return
     }
@@ -1717,9 +1736,10 @@ Panel {
         }
 
         // ---------- Data plan ----------
-        PanelSeparator { foreground: root.barForeground }
+        PanelSeparator { visible: root.showUsage; foreground: root.barForeground }
 
         Column {
+          visible: root.showUsage
           width: parent.width
           spacing: Style.space(10)
 
@@ -2924,6 +2944,14 @@ Panel {
               label: "IDLE POLL (SEC)"
               hint: "60"
               tuneKey: "interval"
+            }
+
+            TuneDrop {
+              id: tuneUsageDrop
+              label: "DATA USAGE"
+              options: [{ value: "yes", label: "Shown" }, { value: "no", label: "Hidden" }]
+              current: root.showUsage ? "yes" : "no"
+              tuneKey: "usage"
             }
 
             TuneDrop {

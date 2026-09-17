@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "relctx.cellular",
   "name": "Cellular",
-  "version": "2.0",
+  "version": "2.0.1",
   "author": "relctx",
   "license": "MIT",
   "description": "Cellular (WWAN/Mobile Data) for Omarchy: LTE and 5G modems, SIM and eSIM, data plans, diagnostics",

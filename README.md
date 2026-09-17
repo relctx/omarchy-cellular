@@ -14,6 +14,24 @@ the modem's own control port.
 <sub>The panel: active card, connection stats, signal history, data meter, radio mode.</sub>
 </p>
 
+## 2.0.1 changes
+
+### Features
+
+- **The data usage section can be hidden.** A usage setting joins the Panel
+  group in the settings box, or `omarchy-cellular settings usage no` from the
+  command line. Hiding it collapses the section and its separator.
+
+### Fixes
+
+- **The panel no longer refreshes because of nearby Wi-Fi.** Access points
+  coming, going and changing strength were waking the widget every few seconds,
+  each time running a full update. In a crowded place that cost noticeable
+  battery. Cellular failover still repaints immediately.
+- **The bar repaints as soon as a modem reappears.** A modem returning to the
+  bus, as it does partway through a SIM switch, was taken for a routine signal
+  update and ignored, leaving the bar stale until the next poll.
+
 ## 2.0 changes
 
 For anyone coming from the 1.0.x marketplace build:
@@ -192,7 +210,7 @@ omarchy-cellular sms delete 3
 Grouped, and staged: changes apply when Save is clicked. Display holds the layout
 preset (full stats, a condensed grid, a split chart-beside-stats view, chart only,
 stats only, or hidden), the chart metric, and the chart period. Panel holds the
-idle fallback poll and SMS notifications. Network holds IP type, route metric,
+idle fallback poll, the data usage section, and SMS notifications. Network holds IP type, route metric,
 and operator ID. Modem
 selects which device the plugin drives on a machine with more than one. The form
 reads and writes `cellular.conf`; the `settings` verb is the same interface from the
@@ -233,7 +251,8 @@ omarchy-cellular devices             every modem present; * marks the one driven
 omarchy-cellular device <port|auto>  drive one modem, disable the rest
 omarchy-cellular settings <key> [value]  panel settings: stats (layout preset),
                                      spark-metric, spark-minutes, interval,
-                                     sms-notify, ip-type, route-metric, operator-id
+                                     sms-notify, usage, ip-type, route-metric,
+                                     operator-id
 omarchy-cellular at '<command>'      one AT command, manual diagnostics only
 omarchy-cellular autoconnect on|off
 omarchy-cellular prefer [cellular|wifi]  which link carries traffic when both are up
