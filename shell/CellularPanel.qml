@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Cellular (WWAN) bar widget with an anchored popup panel. All state comes from
@@ -1563,7 +1564,7 @@ Panel {
               onWidthChanged: requestPaint()
               property var pts: root.rsrpHistory
               // The theme's accent is the pen; everything else stays neutral.
-              property color line: Color.accent
+              property color line: Commons.Color.accent
               onPtsChanged: requestPaint()
               onLineChanged: requestPaint()
               onPaint: {
@@ -1803,7 +1804,7 @@ Panel {
               height: planTrack.height
               radius: planTrack.radius
               width: Math.max(planTrack.height, planTrack.width * root.usedFraction)
-              color: root.usedFraction >= 0.9 ? root.urgent : Color.accent
+              color: root.usedFraction >= 0.9 ? root.urgent : Commons.Color.accent
               Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
             }
 
@@ -2514,7 +2515,7 @@ Panel {
                 DiagCell {
                   width: diagTable.cRole
                   text: diagRow.modelData.role
-                  color: Color.accent
+                  color: Commons.Color.accent
                   opacity: diagRow.modelData.role ? 1 : 0
                   font.weight: Font.DemiBold
                 }
@@ -3884,7 +3885,7 @@ Column {
       y: 0
       width: groupTitle.implicitWidth + Style.space(6)
       height: groupTitle.implicitHeight
-      color: Color.popups.background
+      color: Commons.Color.popups.background
     }
 
     Text {
