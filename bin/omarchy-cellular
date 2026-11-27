@@ -1907,6 +1907,11 @@ cmd_sms() {
       ts=$(sms_prop "$p" Timestamp)
       # An object mid-deletion still lists but answers nothing; skip it.
       [[ -z $num && -z $ts && -z $(sms_prop "$p" Text) ]] && continue
+      # A message still arriving (State 2, receiving) has its number and
+      # time but not yet its text: a multipart text fills in part by part.
+      # Leave it out until the modem has all of it; the panel re-reads on
+      # the State change, so it appears once, complete.
+      [[ $(sms_prop "$p" State) == 2 ]] && continue
       # PduType 1 is a received message, 2 one this side sent.
       local kind
       kind=$([[ $(sms_prop "$p" PduType) == 2 ]] && echo sent || echo received)

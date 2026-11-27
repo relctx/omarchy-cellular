@@ -383,8 +383,9 @@ Panel {
   // more than one.
   property var devices: []
 
-  // Text messages: loaded when the box opens and when one arrives. The
-  // Messaging.Added signal rides the same event feed as everything else.
+  // Text messages: loaded when the box opens and when one finishes
+  // arriving. Messaging.Added and the message's own State change ride the
+  // same event feed as everything else.
   property string euiccFree: ""
   property var smsList: []
   property var smsSeen: null
@@ -1127,7 +1128,22 @@ Panel {
       if (root.opened) eventDebounce.restart()
       return
     }
-    if (line.indexOf(".Messaging.Added") !== -1) loadSms()
+    // For a multipart text, Messaging.Added fires as soon as its first part
+    // arrives, before the body is in:
+    //   /org/freedesktop/ModemManager1/Modem/8: ...Modem.Messaging.Added
+    //   (objectpath '/org/freedesktop/ModemManager1/SMS/406', true)
+    // the message turns readable with a State change on its own object:
+    //   /org/freedesktop/ModemManager1/SMS/406: ...PropertiesChanged
+    //   ('org.freedesktop.ModemManager1.Sms', {'State': <uint32 3>, ...
+    //   'Text': <'...'>}, @as [])
+    // Re-read on any property change under /SMS/: the feed leaves out
+    // messages still arriving, so the first read that sees one sees it
+    // whole. Anchored to the line start, the sender's path: the modem's
+    // Messages list and InterfacesAdded name SMS paths too.
+    if (line.indexOf(".Messaging.Added") !== -1
+        || (line.indexOf("/org/freedesktop/ModemManager1/SMS/") === 0
+            && line.indexOf("PropertiesChanged") !== -1))
+      loadSms()
     eventDebounce.restart()
   }
 
